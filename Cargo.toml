@@ -1,0 +1,12 @@
+[package]
+name = "workedin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.30"
+
+# Optimize ratatui even in dev and test builds. The test that renders every
+# terminal size from 1x1 to 140x40 is otherwise slow.
+[profile.dev.package."*"]
+opt-level = 2
