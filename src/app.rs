@@ -3,6 +3,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::event::KeyModifiers;
 
 use crate::data;
+use crate::data::Comment;
 use crate::data::Conversation;
 use crate::data::Job;
 use crate::data::Message;
@@ -66,6 +67,10 @@ pub(crate) enum Mode {
     /// Home: the selected post with its comments. `comment` is the selected
     /// comment.
     PostDetail { comment: usize },
+    /// Home: the post view with its "Add a comment" box focused. `comment` is
+    /// the comment that was selected, which Esc selects again. Swallows
+    /// printable keys.
+    CommentBox { comment: usize },
     /// Home: the "Start a post" composer overlay. Swallows printable keys.
     Composer,
     /// Messaging: the reply box under the open thread. Swallows printable keys.
@@ -127,6 +132,8 @@ pub(crate) struct App {
     pub draft: String,
     /// Reply box text.
     pub reply: String,
+    /// The post view's comment box text.
+    pub comment_draft: String,
     /// `Some` while the search overlay is open. Takes every key but Ctrl-C.
     pub search: Option<Search>,
     pub status: Option<&'static str>,
@@ -168,6 +175,7 @@ impl App {
             open_chat: None,
             draft: String::new(),
             reply: String::new(),
+            comment_draft: String::new(),
             search: None,
             status: None,
             should_quit: false,
@@ -294,6 +302,7 @@ impl App {
         match self.mode {
             Mode::Composer => self.on_composer_key(key),
             Mode::Reply => self.on_reply_key(key),
+            Mode::CommentBox { comment } => self.on_comment_key(key, comment),
             Mode::Browse | Mode::PostDetail { .. } => self.on_browse_key(key.code),
         }
     }
@@ -397,8 +406,91 @@ impl App {
                 self.mode = Mode::PostDetail { comment: 0 };
             }
             KeyCode::Char('p') if self.mode == Mode::Browse => self.mode = Mode::Composer,
+            KeyCode::Char('c') => {
+                if let Mode::PostDetail { comment } = self.mode {
+                    self.comment_draft.clear();
+                    self.mode = Mode::CommentBox { comment };
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Mode::PostDetail { comment } = self.mode {
+                    self.delete_comment(comment);
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Removes comment `index` of the open post if it's yours. The selection
+    /// keeps its index, clamped to the list, so the next comment slides under
+    /// the cursor, or the cursor moves up when the last one goes. Anyone
+    /// else's comment, or no comment at all, is left alone without a toast.
+    fn delete_comment(&mut self, index: usize) {
+        let Some(post) = self.posts.get_mut(self.post_sel) else {
+            return;
+        };
+        if post
+            .comments
+            .get(index)
+            .is_none_or(|c| c.author != self.profile.name)
+        {
+            return;
+        }
+        post.comments.remove(index);
+        self.mode = Mode::PostDetail {
+            comment: index.min(post.comments.len().saturating_sub(1)),
+        };
+        self.status = Some("Comment deleted");
+    }
+
+    /// The comment box is a text box, like search: Ctrl- and Alt-modified
+    /// keys do nothing at all. `comment` is the comment selected before `c`.
+    fn on_comment_key(&mut self, key: KeyEvent, comment: usize) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.comment_draft.clear();
+                self.mode = Mode::PostDetail { comment };
+            }
+            KeyCode::Enter => self.post_comment(),
+            KeyCode::Backspace => {
+                self.comment_draft.pop();
+            }
+            _ => {
+                if let Some(ch) = typed(key) {
+                    self.comment_draft.push(ch);
+                }
+            }
+        }
+    }
+
+    /// Appends the comment box text to the open post as the newest comment,
+    /// and selects it.
+    fn post_comment(&mut self) {
+        let body = self.comment_draft.trim();
+        if body.is_empty() {
+            self.status = Some("Write something first");
+            return;
+        }
+        let Some(post) = self.posts.get_mut(self.post_sel) else {
+            return;
+        };
+        post.comments.push(Comment {
+            author: self.profile.name,
+            headline: self.profile.headline,
+            hours_ago: 0,
+            body: body.to_owned(),
+        });
+        self.mode = Mode::PostDetail {
+            comment: post.comments.len() - 1,
+        };
+        self.comment_draft.clear();
+        self.status = Some("Comment posted");
     }
 
     fn on_composer_key(&mut self, key: KeyEvent) {
@@ -591,6 +683,362 @@ mod tests {
                 SearchHit::Post(i) => ("post", app.posts[i].author.to_owned()),
             })
             .collect()
+    }
+
+    /// Opens the post view of Maren Holt's post, the first in the feed.
+    fn maren_post_view() -> App {
+        let mut app = App::new();
+        assert_eq!(app.posts[0].author, "Maren Holt");
+        press(&mut app, KeyCode::Enter);
+        app
+    }
+
+    #[test]
+    fn c_focuses_the_comment_box_only_in_the_post_view() {
+        // The feed: nothing.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.mode, Mode::Browse);
+        assert_eq!(app.post_sel, 1);
+        assert!(app.status.is_none());
+        assert!(app.comment_draft.is_empty());
+
+        // My Network: still Connect / Pending.
+        press(&mut app, KeyCode::Char('2'));
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.suggestions[0].pending);
+        assert_eq!(app.status, Some("Invitation sent"));
+        assert_eq!(app.mode, Mode::Browse);
+        press(&mut app, KeyCode::Char('c'));
+        assert!(!app.suggestions[0].pending);
+        assert_eq!(app.status, Some("Invitation withdrawn"));
+
+        // The post view, with the third comment selected.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.mode, Mode::CommentBox { comment: 2 });
+        assert!(app.status.is_none());
+
+        // Esc discards the draft and selects the same comment again.
+        let n = app.posts[0].comments.len();
+        type_str(&mut app, "never mind");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        assert!(app.comment_draft.is_empty());
+        assert_eq!(app.posts[0].comments.len(), n);
+
+        // Every visit starts empty.
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.comment_draft.is_empty());
+    }
+
+    #[test]
+    fn the_comment_box_types_keys_instead_of_acting_on_them() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('c'));
+        let before = snapshot(&app);
+        let reactions = app.posts[0].reactions;
+        let comments = app.posts[0].comments.len();
+
+        type_str(&mut app, "q1jklcp/ 5");
+        assert_eq!(app.comment_draft, "q1jklcp/ 5");
+        assert!(!app.should_quit, "q is typed, not quit");
+        assert_eq!(snapshot(&app), before, "1, 5, j and k are typed");
+        assert_eq!(app.mode, Mode::CommentBox { comment: 1 });
+        assert_eq!(app.posts[0].reactions, reactions, "l is typed, not a like");
+        assert!(!app.posts[0].liked);
+        assert!(app.search.is_none(), "/ is typed, not search");
+        assert!(app.draft.is_empty(), "p is typed, not the composer");
+        assert_eq!(app.posts[0].comments.len(), comments);
+        assert!(app.status.is_none());
+
+        // Shift is fine.
+        app.on_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT));
+        assert_eq!(app.comment_draft, "q1jklcp/ 5Q");
+
+        // Tab, BackTab, arrows and Ctrl- or Alt-modified keys do nothing.
+        for code in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            press(&mut app, code);
+        }
+        for (code, modifiers) in [
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            (KeyCode::Char('l'), KeyModifiers::ALT),
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::ALT),
+            (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Esc, KeyModifiers::CONTROL),
+            (KeyCode::Char('1'), KeyModifiers::ALT),
+        ] {
+            app.on_key(KeyEvent::new(code, modifiers));
+        }
+        assert_eq!(app.comment_draft, "q1jklcp/ 5Q");
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(app.posts[0].comments.len(), comments);
+        assert!(app.status.is_none());
+
+        // Backspace deletes, and on an empty draft keeps focus.
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.comment_draft, "q1jklcp/ 5");
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        assert!(app.comment_draft.is_empty());
+        assert_eq!(app.mode, Mode::CommentBox { comment: 1 }, "still focused");
+
+        // Ctrl-C still quits.
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn posting_a_comment_appends_it_and_selects_it() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        let reactions = app.posts[0].reactions;
+        let others: Vec<usize> = app.posts.iter().map(|p| p.comments.len()).collect();
+        assert_eq!(app.posts[0].comments.len(), 3);
+        let before = snapshot(&app);
+
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "  Great write-up,  thanks! q1/  ");
+        press(&mut app, KeyCode::Enter);
+
+        let post = &app.posts[0];
+        assert_eq!(post.comments.len(), 4);
+        let mine = post.comments.last().expect("just posted");
+        assert_eq!(mine.author, "Jordan Vale");
+        assert_eq!(mine.headline, app.profile.headline);
+        assert_eq!(mine.hours_ago, 0);
+        assert_eq!(mine.body, "Great write-up,  thanks! q1/", "trimmed only");
+        // The seed comments are untouched, oldest first.
+        assert_eq!(post.comments[0].author, data::posts()[0].comments[0].author);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+        assert!(app.comment_draft.is_empty());
+        assert_eq!(app.status, Some("Comment posted"));
+
+        // Nothing else moved.
+        assert_eq!(post.reactions, reactions);
+        assert!(!post.liked);
+        assert_eq!(app.post_sel, 0);
+        let (tab, _, sels, open_chat, new) = snapshot(&app);
+        assert_eq!(
+            (tab, sels, open_chat, new),
+            (before.0, before.2, before.3, before.4)
+        );
+        for (i, p) in app.posts.iter().enumerate().skip(1) {
+            assert_eq!(p.comments.len(), others[i], "post {i}");
+        }
+
+        // Search opens from the post view and Esc puts back the new selection.
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "maren");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+    }
+
+    /// Everything deleting a comment must leave alone: every post's
+    /// reactions and like state, and `post_sel`.
+    fn untouched(app: &App) -> (Vec<(u32, bool)>, usize) {
+        let posts = app.posts.iter().map(|p| (p.reactions, p.liked)).collect();
+        (posts, app.post_sel)
+    }
+
+    fn bodies(app: &App, post: usize) -> Vec<String> {
+        app.posts[post]
+            .comments
+            .iter()
+            .map(|c| c.body.clone())
+            .collect()
+    }
+
+    #[test]
+    fn x_deletes_your_comment_and_keeps_the_index() {
+        let mut app = maren_post_view();
+        let seed = bodies(&app, 0);
+        let others: Vec<usize> = app.posts.iter().map(|p| p.comments.len()).collect();
+        for text in ["first", "second", "third"] {
+            press(&mut app, KeyCode::Char('c'));
+            type_str(&mut app, text);
+            press(&mut app, KeyCode::Enter);
+        }
+        let before = untouched(&app);
+
+        // In the middle: the next comment slides under the cursor.
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 4 });
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.status, Some("Comment deleted"));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 4 });
+        let mut want = seed.clone();
+        want.extend(["first".to_owned(), "third".to_owned()]);
+        assert_eq!(bodies(&app, 0), want);
+
+        // At the end: the cursor moves up.
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.status, Some("Comment deleted"));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+        want.pop();
+        assert_eq!(bodies(&app, 0), want);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        assert_eq!(bodies(&app, 0), seed);
+
+        // Now on a seed comment: nothing, not even a toast.
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.status.is_none());
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        assert_eq!(bodies(&app, 0), seed);
+
+        assert_eq!(untouched(&app), before);
+        for (i, p) in app.posts.iter().enumerate().skip(1) {
+            assert_eq!(p.comments.len(), others[i], "post {i}");
+        }
+    }
+
+    #[test]
+    fn x_deletes_the_only_comment() {
+        let mut app = App::new();
+        for _ in 0..7 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.posts[7].author, "Lucia Brandt");
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "Floor three thanks you");
+        press(&mut app, KeyCode::Enter);
+        let before = untouched(&app);
+
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.status, Some("Comment deleted"));
+        assert!(app.posts[7].comments.is_empty());
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        assert_eq!(untouched(&app), before);
+
+        // With no comments left, x does nothing.
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.status.is_none());
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+    }
+
+    #[test]
+    fn x_leaves_seed_comments_and_empty_posts_alone() {
+        let mut app = App::new();
+        // The seed has no comment of yours.
+        assert!(
+            app.posts
+                .iter()
+                .flat_map(|p| &p.comments)
+                .all(|c| c.author != app.profile.name)
+        );
+        // In the feed, x does nothing.
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.status.is_none());
+
+        press(&mut app, KeyCode::Enter);
+        for comment in 0..3 {
+            assert_eq!(app.mode, Mode::PostDetail { comment });
+            press(&mut app, KeyCode::Char('x'));
+            assert!(app.status.is_none(), "comment {comment}");
+            assert_eq!(app.posts[0].comments.len(), 3);
+            assert_eq!(app.mode, Mode::PostDetail { comment });
+            press(&mut app, KeyCode::Char('j'));
+        }
+
+        // A post with no comments.
+        let mut app = App::new();
+        for _ in 0..7 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Enter);
+        let before = untouched(&app);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.status.is_none());
+        assert!(app.posts[7].comments.is_empty());
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        assert_eq!(untouched(&app), before);
+    }
+
+    #[test]
+    fn x_is_typed_in_the_comment_box() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "mine");
+        press(&mut app, KeyCode::Enter);
+        // Your own comment is selected, and x still only types.
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "x-ray");
+        assert_eq!(app.comment_draft, "x-ray");
+        assert_eq!(app.mode, Mode::CommentBox { comment: 3 });
+        assert_eq!(app.posts[0].comments.len(), 4);
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn empty_and_blank_comments_are_rejected() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Write something first"));
+        assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
+
+        type_str(&mut app, "   ");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Write something first"));
+        assert_eq!(app.mode, Mode::CommentBox { comment: 0 }, "keeps focus");
+        assert_eq!(app.comment_draft, "   ", "and the draft");
+        assert_eq!(app.posts[0].comments.len(), 3);
+
+        // The toast clears on the next key, which is typed.
+        type_str(&mut app, "ok");
+        assert!(app.status.is_none());
+        assert_eq!(app.comment_draft, "   ok");
+    }
+
+    #[test]
+    fn a_comment_survives_leaving_the_post_and_isnt_searched() {
+        let mut app = App::new();
+        for _ in 0..7 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.posts[7].author, "Lucia Brandt");
+        assert!(app.posts[7].comments.is_empty());
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "zebra crossing");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('3'));
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(
+            (app.tab, app.mode, app.post_sel),
+            (Tab::Home, Mode::Browse, 7)
+        );
+        press(&mut app, KeyCode::Enter);
+        let comments = &app.posts[7].comments;
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].body, "zebra crossing");
+
+        // Comments aren't searched.
+        assert!(app.search_hits("zebra").is_empty());
     }
 
     #[test]

@@ -14,8 +14,8 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   feed, news), and the familiar My Network, Jobs, Messaging and Notifications
   pages.
 - It responds the way LinkedIn does: liking posts, opening a post with its
-  comments, writing a post, accepting or ignoring invitations, sending
-  connection requests, saving jobs and applying, reading and replying to
+  comments, commenting on it and deleting your own comments, writing a post,
+  accepting or ignoring invitations, sending connection requests, saving jobs and applying, reading and replying to
   messages, and clearing notifications. `/` searches people, jobs and posts
   and jumps to the result.
 - One self-contained binary. No network, no files written at runtime and no
@@ -25,8 +25,8 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
 
 - Real LinkedIn data or accounts (would need auth and APIs, and raises privacy
   concerns).
-- Persisting state between runs. Likes, posts, connections, saved jobs and
-  messages reset on restart.
+- Persisting state between runs. Likes, posts, comments, connections, saved
+  jobs and messages reset on restart.
 - Mouse support.
 
 ## Build & run
@@ -98,7 +98,7 @@ of line. Don't add them. A unit test checks every seed string, every hint and
 every rendered cell.
 
 **Typed text is the exception.** You can type `日本語` or an emoji into the
-composer, the reply box or the search box, so everything in `ui.rs` that
+composer, the reply box, the comment box or the search box, so everything in `ui.rs` that
 wraps, truncates or measures text uses display width (`width_of`, which is
 ratatui's `Span::width`), never the `char` count. `head` and `tail` keep the longest
 start or end of a string that fits in N columns. `hard_wrap` splits typed text
@@ -133,8 +133,8 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     stale.
 - **Footer:** key hints for the current tab and mode. A toast replaces them
   (white on blue) until the next key press. Every hint set fits on one line at
-  80 columns. There are nine sets: Home, post view, composer, My Network,
-  Jobs, Messaging list, reply box, Notifications and search.
+  80 columns. There are ten sets: Home, post view, comment box, composer, My
+  Network, Jobs, Messaging list, reply box, Notifications and search.
 - **Selection:** the selected list row has a blue `▌` bar and a highlighted
   background. The selected feed card and the focused box have a light blue
   border. Lists scroll only once the selection would fall off the bottom.
@@ -157,9 +157,70 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   profile card only at 80 or more. Below 80 only the feed is left.
 - **Post view (Enter):** the post replaces the feed column. It shows the full
   body with newlines kept, the counts and action row, a rule, then the
-  comments. `j`/`k` select a comment (marked with a blue `┃`), and the view
-  scrolls just far enough to show the end of the selected one. A post with no
-  comments says "No comments yet".
+  comments, oldest first. `j`/`k` select a comment (marked with a blue `┃`).
+  A post with no comments says "No comments yet" instead of the `Comments`
+  heading.
+  - **"Add a comment" box:** always at the bottom of the Post card, inside its
+    border (`post_detail_areas` splits the card's inside into the comments and
+    a 3-row box). It is drawn like the Messaging reply box
+    (`render_comment_box`): a dim `Press c to comment` until `c` focuses it,
+    then the draft followed by a `▏` cursor, or the dim placeholder
+    `Add a comment…` followed by the cursor when the draft is empty. A draft
+    too wide for the box shows its end (`tail`, by display width), so the
+    cursor and what you just typed stay in view. Its border is light blue
+    while it has focus. In a box too narrow for the whole placeholder, the
+    placeholder is cut (`head`) so the cursor still shows.
+  - **Scrolling:** the comments scroll in the rows above the box, never under
+    it: the view scrolls just far enough to show the end of the selected
+    comment above the box. A comment you post is selected, so it ends right
+    above the box.
+  - **Short cards:** the box shows only when it fits whole: the card's inside
+    needs 3 rows and 5 columns. The post and comments get whatever rows are
+    left, possibly none, so a focused box stays visible as long as possible.
+    On a smaller card only the post and comments show. At 120×30, 80×24 and
+    60×20 the box always shows in full.
+  - **Deleting your comments:** `x` removes the selected comment if you wrote
+    it and toasts "Comment deleted". The count, on the card too, follows, and
+    deleting a post's only comment brings back "No comments yet". `x` on
+    someone else's comment does nothing, and every seed comment is someone
+    else's.
+
+  Captured from the real binary in a 120×30 tmux pane, after posting
+  `Agreed: q1 caching / split shards is the way` on Maren Holt's post and
+  pressing `c` again to start another comment:
+
+  ```
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ in    ⌕ Search                                 1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ╭ You ─────────────────╮╭ Post ──────────────────────────────────────────────────────────╮╭ WorkedIn News ─────────────╮
+  │ Jordan Vale          ││ 342 reactions · 4 comments                                     ││ Top stories                │
+  │ Software Engineer at ││ Like  Comment  Repost  Send                                    ││ · Tabs-versus-spaces truce │
+  │ Quillfeather Systems ││ ────────────────────────────────────────────────────────────── ││   enters its third week    │
+  │                      ││ Comments                                                       ││   2h ago · 4,812 readers   │
+  │ Connections      312 ││                                                                ││ · Offices report record    │
+  │ Saved jobs         1 ││   Felix Abernathy · 1h                                         ││   demand for standing      │
+  ╰──────────────────────╯│   Software Engineering Intern at Quillfeather Systems          ││   desks                    │
+                          │   Can confirm. I pushed twice before lunch today and both runs ││   5h ago · 2,960 readers   │
+                          │   finished.                                                    ││ · Study: stand-ups shorter │
+                          │                                                                ││   when chairs are removed  │
+                          │   Ravi Tenorio · 1h                                            ││   9h ago · 1,745 readers   │
+                          │   Engineering Manager at Quillfeather Systems                  ││ · Terminal apps make a     │
+                          │   The deleted suite is my favorite part. Nobody missed it.     ││   quiet comeback           │
+                          │                                                                ││   20h ago · 1,203 readers  │
+                          │   Hana Sorensen · now                                          ││ · Four-day sprints win     │
+                          │   Data Scientist at Brightkettle                               ││   fans among small teams   │
+                          │   Would love a write-up of the caching setup.                  ││   1d ago · 986 readers     │
+                          │                                                                │╰────────────────────────────╯
+                          │ ┃ Jordan Vale · now                                            │
+                          │ ┃ Software Engineer at Quillfeather Systems                    │
+                          │ ┃ Agreed: q1 caching / split shards is the way                 │
+                          │ ╭ Add a comment ─────────────────────────────────────────────╮ │
+                          │ │ Happy to pair on the write-up▏                             │ │
+                          │ ╰────────────────────────────────────────────────────────────╯ │
+                          ╰────────────────────────────────────────────────────────────────╯
+   type write  backspace delete  enter post  esc cancel
+  ```
 - **Composer (p):** a "Create a post" box centered over the body. It shows
   `Jordan Vale · Post to Anyone`, then the draft with a `▏` cursor, or the
   placeholder "What do you want to talk about?". The draft is split into rows
@@ -303,7 +364,7 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
 struct Profile      { name, headline, connections: u32 }
 struct Post         { author, headline, hours_ago: u32, body: String,
                       reactions: u32, comments: Vec<Comment>, liked: bool }
-struct Comment      { author, headline, hours_ago: u32, body }
+struct Comment      { author, headline, hours_ago: u32, body: String }
 struct News         { title, hours_ago: u32, readers: u32 }
 struct Person       { name, headline, mutual: u32 }
 struct Suggestion   { person: Person, pending: bool }
@@ -316,16 +377,19 @@ struct Message      { from_me: bool, body: String, hours_ago: u32 }
 struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 ```
 
-- **Strings are `&'static str`** except `Post::body` and `Message::body`,
-  which are `String` because published posts and replies hold typed text.
+- **Strings are `&'static str`** except `Post::body`, `Message::body` and
+  `Comment::body`, which are `String` because published posts, replies and
+  comments hold typed text. A comment's author and headline are still
+  `&'static str`: yours come from the profile.
 - **Ages** are stored as `hours_ago` (or `days_ago` for jobs), not
-  timestamps, so rendering and the tests are deterministic. What you publish
-  or send has age 0, shown as `now`.
+  timestamps, so rendering and the tests are deterministic. What you publish,
+  send or comment has age 0, shown as `now`.
 - **`Notification::unread` drives the badge, and `is_new` drives the `●`.**
   `is_new` is set from `unread` when you enter the tab and cleared when you
   leave it. Both are `false` in the seed except `unread` on three items.
 - **The comment count is `comments.len()`.** Unlike workit, there is no
-  separate displayed total, so the card and the post view always agree.
+  separate displayed total, so the card and the post view always agree,
+  including right after you comment.
 - **Seed:** you are "Jordan Vale" with 312 connections. 9 posts, 5 news items,
   3 invitations, 4 suggestions, 6 jobs (1 saved), 4 conversations (2 unread)
   and 5 notifications (3 unread). Companies (Quillfeather Systems,
@@ -338,10 +402,10 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 |---|---|
 | `profile`, `posts`, `news`, `invitations`, `suggestions`, `jobs`, `conversations`, `notifications` | seed data, mutated in place |
 | `tab: Tab` | `Home`, `Network`, `Jobs`, `Messaging`, `Notifications` |
-| `mode: Mode` | `Browse`, `PostDetail { comment }`, `Composer`, `Reply` |
+| `mode: Mode` | `Browse`, `PostDetail { comment }`, `CommentBox { comment }`, `Composer`, `Reply` |
 | `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs |
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
-| `draft`, `reply` | composer and reply box text |
+| `draft`, `reply`, `comment_draft` | composer, reply box and comment box text |
 | `search: Option<Search>` | `Some { query, selected }` while search is open. `selected` indexes `App::search_hits` |
 | `status: Option<&'static str>` | toast text. Every toast is a fixed string. Cleared on the next key press |
 | `should_quit` | checked by the event loop in `main.rs` |
@@ -372,6 +436,26 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   goes. An empty list leaves it at 0, where `a`, `x` and `c` do nothing.
 - **Publishing** inserts the post at index 0 and sets `post_sel` to 0. The
   published body is the draft with surrounding whitespace trimmed.
+- **The comment box** is `Mode::CommentBox { comment }`, where `comment` is
+  the comment selected in the post view when you pressed `c`. Esc goes back to
+  `PostDetail { comment }`, so the same comment is selected again. `c` clears
+  `comment_draft`, so every visit starts empty, and Esc clears it too.
+- **Commenting** (`post_comment`) pushes a `Comment` onto the end of the
+  selected post's `comments` (the newest goes last, as in the seed): your
+  profile's name and headline, age 0, and the draft with surrounding
+  whitespace trimmed (what's inside is kept as typed). Then it selects the new
+  comment (`PostDetail { comment: len - 1 }`), clears the draft and toasts
+  "Comment posted". It changes nothing else: not the reactions or like state,
+  `post_sel`, or another tab. Comments aren't searched, so a commented word
+  doesn't make the post a result.
+- **Deleting a comment** (`delete_comment`, `x` in `PostDetail`) removes the
+  selected comment only when its author is your profile's name, and toasts
+  "Comment deleted". The selection keeps its index, clamped to the list, as
+  removing an invitation does on My Network: the next comment slides under
+  the cursor, or the cursor moves up when the last one goes, and an empty
+  list leaves it at 0. Anyone else's comment, or a post with no comments,
+  gets nothing, not even a toast. Reactions, like state, `post_sel` and the
+  other posts' comments don't change.
 - **Text boxes:** a key is typed when it is `KeyCode::Char` without Ctrl or
   Alt. Shift is fine.
 
@@ -379,7 +463,7 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 
 **Global:** Ctrl-C quits from any mode, including the text boxes.
 
-Everywhere except the composer, the reply box and search:
+Everywhere except the composer, the reply box, the comment box and search:
 
 | Key | Action |
 |---|---|
@@ -397,6 +481,8 @@ Per tab:
 | Home | `l` | like / unlike the selected post, reactions ±1. Also in the post view |
 | Home | `Enter` | open the post view |
 | Home | `p` | open the composer (from the feed, not the post view) |
+| Home | `c` | in the post view, focus the "Add a comment" box with an empty draft. In the feed it does nothing |
+| Home | `x` | in the post view, delete the selected comment if it's yours: "Comment deleted". Otherwise, and in the feed, nothing |
 | My Network | `a` | accept the selected invitation: removed, connections +1, "Invitation accepted" |
 | My Network | `x` | ignore it: removed, connections unchanged, "Invitation ignored" |
 | My Network | `c` | on a suggestion, Connect ↔ Pending: "Invitation sent" / "Invitation withdrawn" |
@@ -433,6 +519,17 @@ search open with the query. `Esc` closes it and discards the query. `Tab`,
 `BackTab` and every Ctrl- or Alt-modified key do nothing (Ctrl-C still
 quits).
 
+**Comment box:** a text box like search. Every printable key without Ctrl or
+Alt is typed, including `q`, `j`, `k`, `l`, `c`, `x`, `p`, `/` and `1`-`5`, and
+does nothing else (no quit, comment move, like, delete, composer, search or
+tab switch). `Backspace` deletes, and does nothing on an empty draft (the box
+keeps focus). `Enter` posts the comment, selects it and toasts "Comment
+posted", or toasts "Write something first" and keeps the box focused, with
+the draft as it was, when the draft is empty or only whitespace. `Esc`
+discards the draft and returns to the post view with the same comment
+selected. `Tab`, `BackTab`, the arrows and every Ctrl- or Alt-modified key do
+nothing (Ctrl-C still quits).
+
 **Reply box:** printable keys are typed the same way. `Enter` appends the
 reply to the thread as yours, clears the box and keeps focus. An empty or
 whitespace-only reply does nothing. `Esc` discards the text and returns focus
@@ -458,13 +555,14 @@ doesn't show the cursor, so `main.rs` wraps that hook to also send
 `cursor::Show`, and does the same after a normal quit. Both paths were checked
 in tmux: after `q`, and after a temporarily injected panic, `stty` matched
 its state from before launch, the alternate screen was off and the cursor was
-visible.
+visible. Both were checked again after the comment box was added, the panic
+injected while the box had focus.
 
 ## Testing
 
-62 unit tests, run with `cargo test` (about 6 s):
+79 unit tests, run with `cargo test` (about 6 s):
 
-- **`app.rs`** (29), on the seed data:
+- **`app.rs`** (38), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -508,18 +606,47 @@ visible.
     "No results" and stays open. The selection clamps at both ends and goes
     back to the first result when the query changes. Jumping from
     Notifications clears its markers, Esc doesn't.
-- **`ui.rs`** (33), rendering into a `TestBackend`:
+  - Comment box, opening: `c` in the feed changes nothing, `c` on My Network
+    still toggles Connect/Pending, and `c` in the post view focuses the box
+    with the third comment remembered. Esc discards the draft and selects the
+    third comment again, and reopening starts empty.
+  - Comment box typing: `q1jklcp/ 5` is typed, with no quit, tab switch,
+    comment move, like, composer or search. Shift is fine. `Tab`, `BackTab`,
+    the four arrows and Ctrl/Alt keys (including Ctrl-Enter, Alt-Backspace and
+    Ctrl-Esc) change nothing. Backspace on an empty draft keeps focus. Ctrl-C
+    quits.
+  - Posting on Maren Holt's post: a fourth comment, last, by Jordan Vale with
+    your headline, age 0 and the trimmed body (inner double space kept),
+    selected, with "Comment posted". Reactions, like state, `post_sel`, the
+    other tabs and the other posts' comments are unchanged, and `/` then Esc
+    keeps the new comment selected. Empty and whitespace-only drafts toast
+    "Write something first" and keep focus and the draft.
+  - A comment on Lucia Brandt's post survives Esc, a trip to Jobs and back and
+    reopening the post. `zebra` from `zebra crossing` finds nothing.
+  - Deleting: with three comments of yours after Maren Holt's three, `x` on
+    the middle one leaves the third under the cursor, `x` on the last moves
+    the cursor up, each with "Comment deleted", until only the seed is left.
+    Then `x` on a seed comment does nothing. Reactions, like states,
+    `post_sel` and the other posts' comments are unchanged. Deleting the only
+    comment on Lucia Brandt's post empties it with the selection at 0, and a
+    second `x` toasts nothing.
+  - No seed comment is yours. `x` in the feed, on each of Maren Holt's seed
+    comments and on a post with no comments changes nothing and toasts
+    nothing. In the comment box, with your own comment selected, `x` is
+    typed.
+- **`ui.rs`** (41), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 15 states:
-    Home, post view, composer (empty and with text), My Network (invitation
-    and suggestion selected), Jobs (with and without a toast), Messaging,
-    reply box, Notifications, and search (with matches, empty, no match, and
-    over the post view). One thread per state.
+  - Every size from 1×1 to 140×40 renders without panicking, for 18 states:
+    Home, post view, comment box (empty and with text), post view after
+    commenting, composer (empty and with text), My Network (invitation and
+    suggestion selected), Jobs (with and without a toast), Messaging, reply
+    box, Notifications, and search (with matches, empty, no match, and over
+    the post view). One thread per state.
   - Card counts and `Like` → `Liked`. A published post renders first with
     `now`. The post view shows the full body and comments.
   - Badges in the header follow every count and disappear at 0.
@@ -543,8 +670,37 @@ visible.
     Network tabs.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
-  - Each of the nine hint sets is at most 80 columns, and is what the footer
-    shows at 80×24.
+  - Each of the ten hint sets is at most 80 columns, and is what the footer
+    shows at 80×24. The post view footer reads exactly
+    `j/k comments  l like  c comment  x delete  esc back  1-5 tabs  q quit`
+    and the
+    comment box's `type write  backspace delete  enter post  esc cancel`.
+    Those hints and every comment box label are single width.
+  - Comment box states, at 120×30, 80×24 and 60×20: `Press c to comment`
+    (dim, gray border), `Add a comment…▏` and `Nice one▏` (light blue
+    border), and back to `Press c to comment` after Esc. A draft of wide text
+    four times wider than the box shows its end and fills the box to within one
+    column.
+  - Posting raises `3 comments` to `4 comments` in the post view and on the
+    feed card, with the new comment selected. On Lucia Brandt's post, `No
+    comments yet` and `0 comments` become the `Comments` heading, the comment
+    and `1 comment`, also on the card.
+  - Deleting your comment brings `4 comments` back to `3 comments` in the
+    post view and on the feed card, shows "Comment deleted" and selects the
+    last seed comment. Deleting the only comment on Lucia Brandt's post shows
+    `No comments yet` and `0 comments` again. `x` on a seed comment leaves the
+    count and shows no toast.
+  - After three long comments (the last ending in wide text), the newest is
+    selected and at 120×30 and 60×20 its author line, headline and every body
+    line are on screen above the box, ending on the row right above it.
+  - The post view at every size from 1×1 to 140×40 with the box unfocused,
+    focused and empty, focused with a short draft and with a 3,000-character
+    draft mixing `日本語` and ASCII, and with the long comments (unfocused and
+    focused): whenever the box shows, every row of it starts and ends with
+    its border and is exactly the box's width, by display width. At 120×30,
+    80×24 and 60×20 the box shows in full in every one of those states, and the
+    header keeps the logo, all five numbers and the badges at 140, 120, 80, 70
+    and 60 columns.
   - No seed string, tab label or hint contains a character that isn't single
     width, and no rendered cell on any screen holds one. The same goes for
     every search label.
@@ -600,7 +756,33 @@ end-of-body and CJK ones), measuring the rest of the body by `char` count
 fails the CJK excerpt test, and keeping the count however narrow the row
 fails `the_count_goes_before_the_end_of_the_query`.
 
+For commenting, these breaks were each caught and then restored: inserting the
+comment at the front instead of the end fails 3 tests
+(`posting_a_comment_appends_it_and_selects_it`,
+`a_posted_comment_raises_the_count_everywhere`,
+`the_newest_long_comment_shows_whole_above_the_box`); letting `l` like the
+post while the box has focus fails
+`the_comment_box_types_keys_instead_of_acting_on_them` and
+`a_posted_comment_raises_the_count_everywhere` (its comment has an `l`);
+taking the draft's tail by `char` count instead of display width fails
+`a_long_comment_draft_shows_its_end` and
+`the_post_view_stays_inside_its_borders_at_every_size`; scrolling by the
+whole card's height instead of the rows above the box fails
+`a_posted_comment_raises_the_count_everywhere` and
+`the_newest_long_comment_shows_whole_above_the_box`; and making Esc select
+the first comment fails `c_focuses_the_comment_box_only_in_the_post_view`.
+
+For deleting: letting `x` delete anyone's comment fails 3 tests
+(`x_deletes_your_comment_and_keeps_the_index`,
+`x_leaves_seed_comments_and_empty_posts_alone`,
+`deleting_a_comment_lowers_the_count_everywhere`); not clamping the selection
+fails `x_deletes_your_comment_and_keeps_the_index` and
+`deleting_a_comment_lowers_the_count_everywhere`; and letting `x` delete from
+the comment box fails `x_is_typed_in_the_comment_box` and
+`the_post_view_stays_inside_its_borders_at_every_size` (its long draft has
+`x`s in it).
+
 ## Ideas
 
-Comment and repost actions, searching comments and messages, scrolling long
+Repost and send actions, searching comments and messages, scrolling long
 job descriptions, profile pages, mouse support.

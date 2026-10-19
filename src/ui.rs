@@ -456,9 +456,17 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("enter", "send"),
             ("esc", "back to list"),
         ],
+        (_, Mode::CommentBox { .. }) => &[
+            ("type", "write"),
+            ("backspace", "delete"),
+            ("enter", "post"),
+            ("esc", "cancel"),
+        ],
         (_, Mode::PostDetail { .. }) => &[
             ("j/k", "comments"),
             ("l", "like"),
+            ("c", "comment"),
+            ("x", "delete"),
             ("esc", "back"),
             ("1-5", "tabs"),
             ("q", "quit"),
@@ -531,24 +539,31 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
 // ---------------------------------------------------------------- Home
 
-fn render_home(frame: &mut Frame, app: &App, area: Rect) {
+/// Home's profile card, center column and sidebar. A column that doesn't fit
+/// is zero wide.
+fn home_columns(area: Rect) -> [Rect; 3] {
     let show_profile = area.width >= PROFILE_MIN_WIDTH;
     let show_sidebar = area.width >= SIDEBAR_MIN_WIDTH;
-    let [left, center, right] = Layout::horizontal([
+    Layout::horizontal([
         Constraint::Length(if show_profile { PROFILE_WIDTH } else { 0 }),
         Constraint::Min(0),
         Constraint::Length(if show_sidebar { SIDEBAR_WIDTH } else { 0 }),
     ])
-    .areas(area);
+    .areas(area)
+}
 
-    if show_profile {
+fn render_home(frame: &mut Frame, app: &App, area: Rect) {
+    let [left, center, right] = home_columns(area);
+    if left.width > 0 {
         render_profile(frame, app, left);
     }
-    if show_sidebar {
+    if right.width > 0 {
         render_news(frame, app, right);
     }
     match app.mode {
-        Mode::PostDetail { comment } => render_post_detail(frame, app, center, comment),
+        Mode::PostDetail { comment } | Mode::CommentBox { comment } => {
+            render_post_detail(frame, app, center, comment);
+        }
         Mode::Browse | Mode::Composer | Mode::Reply => render_feed(frame, app, center),
     }
 }
@@ -695,6 +710,22 @@ fn render_feed(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+const COMMENT_BOX_HEIGHT: u16 = 3;
+/// A border and a padding column on each side, and one column of text.
+const COMMENT_BOX_MIN_WIDTH: u16 = 5;
+
+/// The Post card's inside, split into the scrolling post and comments, and
+/// the comment box under them. The box goes only when it fits whole: then
+/// the comments get whatever rows are left, possibly none.
+fn post_detail_areas(inner: Rect) -> (Rect, Option<Rect>) {
+    if inner.height < COMMENT_BOX_HEIGHT || inner.width < COMMENT_BOX_MIN_WIDTH {
+        return (inner, None);
+    }
+    let [content, comment_box] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(COMMENT_BOX_HEIGHT)]).areas(inner);
+    (content, Some(comment_box))
+}
+
 fn render_post_detail(frame: &mut Frame, app: &App, area: Rect, selected: usize) {
     let Some(post) = app.selected_post() else {
         return;
@@ -703,6 +734,7 @@ fn render_post_detail(frame: &mut Frame, app: &App, area: Rect, selected: usize)
     let inner = block.inner(area);
     let width = usize_of(inner.width);
     frame.render_widget(block, area);
+    let (content, comment_box) = post_detail_areas(inner);
 
     let mut lines = vec![author_line(post.author, post.hours_ago, width)];
     lines.extend(
@@ -739,7 +771,7 @@ fn render_post_detail(frame: &mut Frame, app: &App, area: Rect, selected: usize)
             Line::styled(truncate(comment.headline, text_width), Style::new().fg(DIM)),
         ];
         block.extend(
-            wrap(comment.body, text_width)
+            wrap(&comment.body, text_width)
                 .into_iter()
                 .map(|l| Line::styled(l, Style::new().fg(Color::Gray))),
         );
@@ -753,8 +785,38 @@ fn render_post_detail(frame: &mut Frame, app: &App, area: Rect, selected: usize)
             selected_end = lines.len();
         }
     }
-    let scroll = selected_end.saturating_sub(usize_of(inner.height));
-    frame.render_widget(Paragraph::new(lines).scroll((u16_of(scroll), 0)), inner);
+    let scroll = selected_end.saturating_sub(usize_of(content.height));
+    frame.render_widget(Paragraph::new(lines).scroll((u16_of(scroll), 0)), content);
+
+    if let Some(area) = comment_box {
+        render_comment_box(frame, app, area);
+    }
+}
+
+/// The "Add a comment" box at the bottom of the post view, drawn like the
+/// Messaging reply box.
+fn render_comment_box(frame: &mut Frame, app: &App, area: Rect) {
+    let focused = matches!(app.mode, Mode::CommentBox { .. });
+    let block = card(" Add a comment ", focused);
+    let box_width = usize_of(block.inner(area).width);
+    let cursor = Span::styled("▏", Style::new().fg(LIGHT_BLUE));
+    let line = match (focused, app.comment_draft.is_empty()) {
+        (false, _) => Line::styled("Press c to comment", Style::new().fg(DIM)),
+        (true, true) => Line::from(vec![
+            Span::styled(
+                head("Add a comment…", box_width.saturating_sub(1)),
+                Style::new().fg(DIM),
+            ),
+            cursor,
+        ]),
+        (true, false) => {
+            // Show the end of a long comment, where the cursor is. One column
+            // goes to the cursor.
+            let shown = tail(&app.comment_draft, box_width.saturating_sub(1)).to_owned();
+            Line::from(vec![Span::raw(shown), cursor])
+        }
+    };
+    frame.render_widget(Paragraph::new(line).block(block), area);
 }
 
 /// A rectangle of at most `width`×`height`, centered in `area`.
@@ -1564,9 +1626,20 @@ mod tests {
         };
         let mut toast = at(&[KeyCode::Char('3'), KeyCode::Char('e')], "");
         toast.status = Some("Application sent");
+        let comment = |text: &str| {
+            at(
+                &[KeyCode::Char('j'), KeyCode::Enter, KeyCode::Char('c')],
+                text,
+            )
+        };
+        let mut commented = comment("Agreed, the meeting-to-doc rule works");
+        press(&mut commented, KeyCode::Enter);
         vec![
             ("home", at(&[], "")),
             ("detail", at(&[KeyCode::Char('j'), KeyCode::Enter], "")),
+            ("comment box", comment("A comment in progress")),
+            ("comment box empty", comment("")),
+            ("detail commented", commented),
             (
                 "composer",
                 at(
@@ -1604,6 +1677,359 @@ mod tests {
                 ),
             ),
         ]
+    }
+
+    /// The inside of the post view's Post card on a `width`×`height` screen.
+    fn post_inner(width: u16, height: u16) -> Rect {
+        let body = screen_areas(Rect::new(0, 0, width, height))[1];
+        card(" Post ", true).inner(home_columns(body)[1])
+    }
+
+    /// Where the comment box is on a `width`×`height` screen, if it shows.
+    fn comment_box(width: u16, height: u16) -> Option<Rect> {
+        post_detail_areas(post_inner(width, height)).1
+    }
+
+    /// Each row of `area` starts and ends with its border and is exactly as
+    /// wide as the box, measured by display width.
+    fn assert_bordered(buf: &Buffer, area: Rect, what: &str) {
+        for y in area.top()..area.bottom() {
+            let row = text_between(buf, y, area.left(), area.right());
+            let ends = match y {
+                y if y == area.top() => ('╭', '╮'),
+                y if y == area.bottom() - 1 => ('╰', '╯'),
+                _ => ('│', '│'),
+            };
+            assert!(
+                row.starts_with(ends.0)
+                    && row.ends_with(ends.1)
+                    && width_of(&row) == usize_of(area.width),
+                "{what}, row {y}: {row:?}"
+            );
+        }
+    }
+
+    /// The text inside the comment box's border, trimmed.
+    fn comment_box_text(app: &App, width: u16, height: u16) -> String {
+        let area = comment_box(width, height).expect("the box shows");
+        let buf = buffer(app, width, height);
+        assert_bordered(&buf, area, &format!("{width}x{height}"));
+        text_between(&buf, area.y + 1, area.left() + 1, area.right() - 1)
+            .trim()
+            .to_owned()
+    }
+
+    fn post_view(down: usize) -> App {
+        let mut app = App::new();
+        for _ in 0..down {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Enter);
+        app
+    }
+
+    fn comment_on(app: &mut App, text: &str) {
+        press(app, KeyCode::Char('c'));
+        type_str(app, text);
+        press(app, KeyCode::Enter);
+    }
+
+    #[test]
+    fn the_comment_box_shows_each_state() {
+        let mut app = post_view(0);
+        for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+            assert_eq!(comment_box_text(&app, width, height), "Press c to comment");
+        }
+        let area = comment_box(120, 30).expect("the box shows");
+        let border = |app: &App| buffer(app, 120, 30)[(area.x, area.y)].fg;
+        assert_eq!(border(&app), BORDER);
+        // The unfocused box is dim, like the reply box.
+        let buf = buffer(&app, 120, 30);
+        assert_eq!(buf[(area.x + 2, area.y + 1)].fg, DIM);
+
+        press(&mut app, KeyCode::Char('c'));
+        for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+            assert_eq!(comment_box_text(&app, width, height), "Add a comment…▏");
+        }
+        assert_eq!(border(&app), LIGHT_BLUE, "the focused box's color");
+
+        type_str(&mut app, "Nice one");
+        assert_eq!(comment_box_text(&app, 120, 30), "Nice one▏");
+        assert_eq!(border(&app), LIGHT_BLUE);
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(comment_box_text(&app, 120, 30), "Press c to comment");
+        assert_eq!(border(&app), BORDER);
+    }
+
+    #[test]
+    fn a_long_comment_draft_shows_its_end() {
+        let draft = WIDE.repeat(4);
+        let mut app = post_view(0);
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, &draft);
+        for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+            let area = comment_box(width, height).expect("the box shows");
+            assert!(
+                width_of(&draft) > usize_of(area.width),
+                "the draft must not fit"
+            );
+            let text = comment_box_text(&app, width, height);
+            let shown = text.strip_suffix('▏').expect("the cursor at the end");
+            assert!(draft.ends_with(shown), "{width}x{height}: {shown:?}");
+            // A border and a padding column each side, and the cursor.
+            let room = usize_of(area.width) - 5;
+            assert!(
+                width_of(shown) <= room && width_of(shown) + 1 >= room,
+                "{width}x{height}: {shown:?} should fill {room} columns, less at most one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_posted_comment_raises_the_count_everywhere() {
+        let mut app = post_view(0);
+        let reactions = app.posts[0].reactions;
+        let before = format!("{reactions} reactions · 3 comments");
+        assert!(screen(&app, 120, 30).contains(&before));
+
+        comment_on(&mut app, "  Congrats to the whole team  ");
+        let after = format!("{reactions} reactions · 4 comments");
+        let s = screen(&app, 120, 30);
+        assert!(s.contains("Comment posted"), "{s}");
+        assert!(s.contains(&after), "post view: {s}");
+        assert!(s.contains("┃ Jordan Vale · now"), "selected: {s}");
+        assert!(s.contains("┃ Congrats to the whole team"), "{s}");
+
+        press(&mut app, KeyCode::Esc);
+        let s = screen(&app, 120, 30);
+        assert!(s.contains(&after), "feed card: {s}");
+        assert!(!s.contains(&before), "{s}");
+    }
+
+    #[test]
+    fn deleting_a_comment_lowers_the_count_everywhere() {
+        let mut app = post_view(0);
+        let reactions = app.posts[0].reactions;
+        comment_on(&mut app, "Posted by mistake");
+        assert!(screen(&app, 120, 30).contains(&format!("{reactions} reactions · 4 comments")));
+
+        press(&mut app, KeyCode::Char('x'));
+        let three = format!("{reactions} reactions · 3 comments");
+        let s = screen(&app, 120, 30);
+        assert!(s.contains("Comment deleted"), "{s}");
+        assert!(s.contains(&three), "post view: {s}");
+        assert!(!s.contains("Posted by mistake"), "{s}");
+        // The cursor moved up to the last seed comment.
+        assert!(s.contains("┃ Hana Sorensen · now"), "{s}");
+
+        press(&mut app, KeyCode::Esc);
+        let s = screen(&app, 120, 30);
+        assert!(
+            s.contains(&three) && !s.contains("4 comments"),
+            "feed card: {s}"
+        );
+
+        // The only comment on Lucia Brandt's post: back to No comments yet.
+        let mut app = post_view(7);
+        comment_on(&mut app, "Floor three thanks you");
+        press(&mut app, KeyCode::Char('x'));
+        let s = screen(&app, 120, 30);
+        assert!(s.contains("No comments yet"), "{s}");
+        assert!(!s.contains("│ Comments "), "{s}");
+        assert!(s.contains("· 0 comments"), "{s}");
+        press(&mut app, KeyCode::Esc);
+        assert!(screen(&app, 120, 30).contains("· 0 comments"));
+
+        // A seed comment stays, with no toast.
+        let mut app = post_view(0);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('x'));
+        let s = screen(&app, 120, 30);
+        assert!(s.contains(&three), "{s}");
+        let footer = s.lines().last().expect("screen has rows").trim();
+        assert!(
+            footer.starts_with("j/k comments") && !footer.contains("Comment deleted"),
+            "no toast: {s}"
+        );
+    }
+
+    #[test]
+    fn the_first_comment_replaces_no_comments_yet() {
+        let mut app = post_view(7);
+        assert_eq!(app.posts[7].author, "Lucia Brandt");
+        let s = screen(&app, 120, 30);
+        assert!(s.contains("No comments yet"), "{s}");
+        assert!(s.contains("· 0 comments"), "{s}");
+        assert!(!s.contains("Comments "), "{s}");
+
+        comment_on(&mut app, "Floor three thanks you");
+        let s = screen(&app, 120, 30);
+        assert!(!s.contains("No comments yet"), "{s}");
+        assert!(s.contains("│ Comments "), "the heading: {s}");
+        assert!(s.contains("┃ Floor three thanks you"), "{s}");
+        assert!(
+            s.contains("· 1 comment ") && !s.contains("1 comments"),
+            "{s}"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        let s = screen(&app, 120, 30);
+        assert!(
+            s.contains("· 1 comment ") && !s.contains("1 comments"),
+            "feed: {s}"
+        );
+    }
+
+    /// Maren Holt's post with three long comments of yours, the last one mixing
+    /// in double-width text.
+    fn long_comments() -> (App, Vec<String>) {
+        let mut app = post_view(0);
+        let bodies: Vec<String> = (1..=3)
+            .map(|n| {
+                let tail = if n == 3 { WIDE } else { "and that is that." };
+                format!(
+                    "Comment {n}: {}{tail}",
+                    "the caching write-up was great and I learned a lot from it, ".repeat(3)
+                )
+            })
+            .collect();
+        for body in &bodies {
+            comment_on(&mut app, body);
+        }
+        (app, bodies)
+    }
+
+    #[test]
+    fn the_newest_long_comment_shows_whole_above_the_box() {
+        let (app, bodies) = long_comments();
+        let newest = bodies.last().expect("three bodies");
+        assert_eq!(app.mode, Mode::PostDetail { comment: 5 });
+        assert_eq!(&app.posts[0].comments[5].body, newest);
+        for (width, height) in [(120, 30), (60, 20)] {
+            let buf = buffer(&app, width, height);
+            let inner = post_inner(width, height);
+            let area = comment_box(width, height).expect("the box shows");
+            assert_bordered(&buf, area, &format!("{width}x{height}"));
+            // The selected comment's rows, all above the box.
+            let rows: Vec<String> = (inner.top()..area.top())
+                .map(|y| text_between(&buf, y, inner.left(), inner.right()))
+                .filter_map(|row| row.strip_prefix("┃ ").map(|r| r.trim_end().to_owned()))
+                .collect();
+            assert!(rows.len() > 4, "{width}x{height}: wraps: {rows:#?}");
+            assert_eq!(rows[0], "Jordan Vale · now", "{width}x{height}: {rows:#?}");
+            assert_eq!(rows[1], app.profile.headline, "{width}x{height}");
+            assert_eq!(&rows[2..].join(" "), newest, "{width}x{height}: {rows:#?}");
+            // It ends right above the box.
+            let last = text_between(&buf, area.top() - 1, inner.left(), inner.right());
+            assert!(last.starts_with("┃ "), "{width}x{height}: {last:?}");
+        }
+    }
+
+    #[test]
+    fn the_post_view_stays_inside_its_borders_at_every_size() {
+        let long: String = "日本語 text".repeat(375);
+        assert_eq!(long.chars().count(), 3_000);
+        let focused = |text: &str| {
+            let mut app = post_view(0);
+            press(&mut app, KeyCode::Char('c'));
+            type_str(&mut app, text);
+            app
+        };
+        let (comments, _) = long_comments();
+        let (mut comments_focused, _) = long_comments();
+        press(&mut comments_focused, KeyCode::Char('c'));
+        type_str(&mut comments_focused, "more");
+        let states = [
+            ("unfocused", post_view(0)),
+            ("focused empty", focused("")),
+            ("focused short", focused("Nice one")),
+            ("focused long", focused(&long)),
+            ("long comments", comments),
+            ("long comments focused", comments_focused),
+        ];
+        std::thread::scope(|scope| {
+            for (name, app) in &states {
+                scope.spawn(move || {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            if let Some(area) = comment_box(width, height) {
+                                let buf = terminal.backend().buffer();
+                                assert_bordered(buf, area, &format!("{name} at {width}x{height}"));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        for (name, app) in &states {
+            // In full at these sizes.
+            for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+                let area = comment_box(width, height).expect("the box shows");
+                assert_eq!(area.height, COMMENT_BOX_HEIGHT);
+                assert!(!comment_box_text(app, width, height).is_empty(), "{name}");
+            }
+            // The header keeps the logo, every tab and every badge.
+            for width in [140, 120, 80, 70, 60] {
+                let row = header_row(app, width, 30);
+                assert!(row.starts_with("│ in "), "{name} at {width}: {row:?}");
+                let (numbers, badges) = tabs_and_badges(&row);
+                assert_eq!(numbers, "12345", "{name} at {width}: {row:?}");
+                assert_eq!(badges, ["3", "2", "3"], "{name} at {width}: {row:?}");
+            }
+        }
+
+        // The long draft shows its end.
+        let text = comment_box_text(&states[3].1, 120, 30);
+        let shown = text.strip_suffix('▏').expect("the cursor at the end");
+        assert!(width_of(shown) > 50 && long.ends_with(shown), "{shown:?}");
+    }
+
+    #[test]
+    fn comment_hints_and_labels() {
+        let footer = |app: &App| {
+            screen(app, 80, 24)
+                .lines()
+                .last()
+                .expect("screen has rows")
+                .trim()
+                .to_owned()
+        };
+        let mut app = post_view(0);
+        assert_eq!(
+            footer(&app),
+            "j/k comments  l like  c comment  x delete  esc back  1-5 tabs  q quit"
+        );
+        assert!(hints_line(hints(&app)).width() <= 80);
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(
+            footer(&app),
+            "type write  backspace delete  enter post  esc cancel"
+        );
+        assert!(hints_line(hints(&app)).width() <= 80);
+        for (key, what) in hints(&app) {
+            assert_single_width("comment hints", key);
+            assert_single_width("comment hints", what);
+        }
+        for label in [
+            " Add a comment ",
+            "Press c to comment",
+            "Add a comment…",
+            "Comment posted",
+            "Comment deleted",
+            "Write something first",
+            "▏",
+            "┃ ",
+        ] {
+            assert_single_width("comment box", label);
+        }
     }
 
     #[test]
@@ -1919,7 +2345,7 @@ mod tests {
                 seen.push(set.as_ptr());
             }
         }
-        assert_eq!(seen.len(), 9, "every hint set was checked");
+        assert_eq!(seen.len(), 10, "every hint set was checked");
     }
 
     fn header_row(app: &App, width: u16, height: u16) -> String {
@@ -2155,7 +2581,7 @@ mod tests {
         for post in &app.posts {
             strings.extend([post.author, post.headline, post.body.as_str()]);
             for c in &post.comments {
-                strings.extend([c.author, c.headline, c.body]);
+                strings.extend([c.author, c.headline, c.body.as_str()]);
             }
         }
         strings.extend(app.news.iter().map(|n| n.title));

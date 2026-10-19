@@ -12,7 +12,8 @@ pub(crate) struct Comment {
     pub author: &'static str,
     pub headline: &'static str,
     pub hours_ago: u32,
-    pub body: &'static str,
+    /// Owned, because comments you post hold typed text.
+    pub body: String,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +118,7 @@ fn c(author: &'static str, headline: &'static str, hours_ago: u32, body: &'stati
         author,
         headline,
         hours_ago,
-        body,
+        body: body.to_owned(),
     }
 }
 
