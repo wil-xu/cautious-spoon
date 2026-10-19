@@ -72,6 +72,30 @@ pub(crate) enum Mode {
     Reply,
 }
 
+/// The search overlay, open over whatever tab and mode it was opened from.
+/// Those stay untouched underneath, so closing it puts everything back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Search {
+    pub query: String,
+    /// Index into `App::search_hits`.
+    pub selected: usize,
+}
+
+/// One search result, pointing into the list it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchHit {
+    Invitation(usize),
+    Suggestion(usize),
+    Job(usize),
+    Post(usize),
+}
+
+/// What a search query matches against: trimmed and lowercased. The same
+/// lowercasing goes on every searched field, so case never matters.
+pub(crate) fn search_needle(query: &str) -> String {
+    query.trim().to_lowercase()
+}
+
 /// The selected row on My Network, which spans both sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkItem {
@@ -103,6 +127,8 @@ pub(crate) struct App {
     pub draft: String,
     /// Reply box text.
     pub reply: String,
+    /// `Some` while the search overlay is open. Takes every key but Ctrl-C.
+    pub search: Option<Search>,
     pub status: Option<&'static str>,
     pub should_quit: bool,
 }
@@ -142,6 +168,7 @@ impl App {
             open_chat: None,
             draft: String::new(),
             reply: String::new(),
+            search: None,
             status: None,
             should_quit: false,
         }
@@ -175,6 +202,39 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Everything that matches `query`, from the current state: people
+    /// (invitations, then suggestions), then jobs, then posts in feed order.
+    /// A query that is empty once trimmed matches nothing.
+    pub(crate) fn search_hits(&self, query: &str) -> Vec<SearchHit> {
+        let needle = search_needle(query);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let found = |fields: &[&str]| fields.iter().any(|f| f.to_lowercase().contains(&needle));
+        let mut hits = Vec::new();
+        for (i, p) in self.invitations.iter().enumerate() {
+            if found(&[p.name, p.headline]) {
+                hits.push(SearchHit::Invitation(i));
+            }
+        }
+        for (i, s) in self.suggestions.iter().enumerate() {
+            if found(&[s.person.name, s.person.headline]) {
+                hits.push(SearchHit::Suggestion(i));
+            }
+        }
+        for (i, job) in self.jobs.iter().enumerate() {
+            if found(&[job.title, job.company, job.location]) {
+                hits.push(SearchHit::Job(i));
+            }
+        }
+        for (i, post) in self.posts.iter().enumerate() {
+            if found(&[post.author, post.headline, &post.body]) {
+                hits.push(SearchHit::Post(i));
+            }
+        }
+        hits
     }
 
     fn network_len(&self) -> usize {
@@ -227,6 +287,10 @@ impl App {
             return;
         }
         self.status = None;
+        if self.search.is_some() {
+            self.on_search_key(key);
+            return;
+        }
         match self.mode {
             Mode::Composer => self.on_composer_key(key),
             Mode::Reply => self.on_reply_key(key),
@@ -243,6 +307,7 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Esc => self.mode = Mode::Browse,
+            KeyCode::Char('/') => self.search = Some(Search::default()),
             _ => match self.tab {
                 Tab::Home => self.on_home_key(code),
                 Tab::Network => self.on_network_key(code),
@@ -250,6 +315,69 @@ impl App {
                 Tab::Messaging => self.on_messaging_key(code),
                 Tab::Notifications => {}
             },
+        }
+    }
+
+    /// The search box is a text box, like the composer, except that Ctrl- and
+    /// Alt-modified keys do nothing at all.
+    fn on_search_key(&mut self, key: KeyEvent) {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return;
+        }
+        let hits = match &self.search {
+            Some(search) => self.search_hits(&search.query),
+            None => return,
+        };
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.search = None,
+            KeyCode::Enter => match hits.get(search.selected) {
+                Some(&hit) => self.open_hit(hit),
+                None => self.status = Some("No results"),
+            },
+            KeyCode::Up => search.selected = search.selected.saturating_sub(1),
+            KeyCode::Down => {
+                search.selected = (search.selected + 1).min(hits.len().saturating_sub(1));
+            }
+            KeyCode::Backspace => {
+                if search.query.pop().is_some() {
+                    search.selected = 0;
+                }
+            }
+            _ => {
+                if let Some(ch) = typed(key) {
+                    search.query.push(ch);
+                    search.selected = 0;
+                }
+            }
+        }
+    }
+
+    /// Closes search and goes to `hit`, switching tabs the way `1`-`5` do.
+    fn open_hit(&mut self, hit: SearchHit) {
+        self.search = None;
+        match hit {
+            SearchHit::Invitation(i) => {
+                self.set_tab(Tab::Network);
+                self.network_sel = i;
+            }
+            SearchHit::Suggestion(i) => {
+                self.set_tab(Tab::Network);
+                self.network_sel = self.invitations.len() + i;
+            }
+            SearchHit::Job(i) => {
+                self.set_tab(Tab::Jobs);
+                self.job_sel = i;
+            }
+            SearchHit::Post(i) => {
+                self.set_tab(Tab::Home);
+                self.post_sel = i;
+            }
         }
     }
 
@@ -418,6 +546,51 @@ mod tests {
         for ch in s.chars() {
             press(app, KeyCode::Char(ch));
         }
+    }
+
+    fn query(app: &App) -> Option<&str> {
+        app.search.as_ref().map(|s| s.query.as_str())
+    }
+
+    fn selected_hit(app: &App) -> usize {
+        app.search.as_ref().expect("search is open").selected
+    }
+
+    /// Everything that `/` then `Esc` must leave as it was.
+    type Snapshot = (Tab, Mode, [usize; 5], Option<usize>, Vec<bool>);
+
+    fn snapshot(app: &App) -> Snapshot {
+        (
+            app.tab,
+            app.mode,
+            [
+                app.post_sel,
+                app.network_sel,
+                app.job_sel,
+                app.chat_sel,
+                app.notif_sel,
+            ],
+            app.open_chat,
+            app.notifications.iter().map(|n| n.is_new).collect(),
+        )
+    }
+
+    /// The kind and name of each hit, to compare against the seed.
+    fn named_hits(app: &App, query: &str) -> Vec<(&'static str, String)> {
+        app.search_hits(query)
+            .into_iter()
+            .map(|hit| match hit {
+                SearchHit::Invitation(i) => ("invitation", app.invitations[i].name.to_owned()),
+                SearchHit::Suggestion(i) => {
+                    ("suggestion", app.suggestions[i].person.name.to_owned())
+                }
+                SearchHit::Job(i) => (
+                    "job",
+                    format!("{} at {}", app.jobs[i].title, app.jobs[i].company),
+                ),
+                SearchHit::Post(i) => ("post", app.posts[i].author.to_owned()),
+            })
+            .collect()
     }
 
     #[test]
@@ -813,5 +986,310 @@ mod tests {
         assert!(app.status.is_some());
         press(&mut app, KeyCode::Char('j'));
         assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn slash_opens_search_everywhere_and_esc_restores_everything() {
+        // Every tab in Browse mode, each with a selection moved off 0.
+        for tab in ['1', '2', '3', '4', '5'] {
+            let mut app = App::new();
+            for k in ['1', '2', '3', '4', '5'] {
+                press(&mut app, KeyCode::Char(k));
+                press(&mut app, KeyCode::Char('j'));
+            }
+            press(&mut app, KeyCode::Char('4'));
+            press(&mut app, KeyCode::Enter);
+            press(&mut app, KeyCode::Esc);
+            press(&mut app, KeyCode::Char(tab));
+            let before = snapshot(&app);
+
+            press(&mut app, KeyCode::Char('/'));
+            assert_eq!(query(&app), Some(""), "tab {tab}");
+            type_str(&mut app, "ana");
+            press(&mut app, KeyCode::Down);
+            assert_eq!(app.tab, before.0, "the tab stays underneath");
+            press(&mut app, KeyCode::Esc);
+            assert!(app.search.is_none(), "tab {tab}");
+            assert_eq!(snapshot(&app), before, "tab {tab}");
+
+            // Reopening starts from an empty query.
+            press(&mut app, KeyCode::Char('/'));
+            assert_eq!(query(&app), Some(""));
+        }
+
+        // The post view, with its selected comment.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+        let before = snapshot(&app);
+        press(&mut app, KeyCode::Char('/'));
+        assert!(app.search.is_some());
+        type_str(&mut app, "hana");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.search.is_none());
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+    }
+
+    #[test]
+    fn slash_is_typed_in_the_composer_and_reply_box() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "a/b");
+        assert_eq!(app.draft, "a/b");
+        assert!(app.search.is_none());
+        assert_eq!(app.mode, Mode::Composer);
+
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "and/or");
+        assert_eq!(app.reply, "and/or");
+        assert!(app.search.is_none());
+        assert_eq!(app.mode, Mode::Reply);
+    }
+
+    #[test]
+    fn search_box_types_keys_instead_of_acting_on_them() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('2'));
+        let before = snapshot(&app);
+        let connections = app.profile.connections;
+        press(&mut app, KeyCode::Char('/'));
+
+        type_str(&mut app, "q1jlpaxcse5/");
+        assert_eq!(query(&app), Some("q1jlpaxcse5/"));
+        assert!(!app.should_quit, "q is typed, not quit");
+        assert_eq!(snapshot(&app), before, "1, 5 and j are typed");
+        assert_eq!(app.invitations.len(), 3, "a and x are typed");
+        assert_eq!(app.profile.connections, connections);
+        assert!(app.suggestions.iter().all(|s| !s.pending), "c is typed");
+        assert!(app.status.is_none());
+
+        // Shift is fine: capitals and symbols are typed.
+        app.on_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT));
+        assert_eq!(query(&app), Some("q1jlpaxcse5/Q"));
+
+        // Tab, BackTab and Ctrl- or Alt-modified keys do nothing.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::BackTab);
+        for (code, modifiers) in [
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            (KeyCode::Char('x'), KeyModifiers::ALT),
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Esc, KeyModifiers::CONTROL),
+            (KeyCode::Down, KeyModifiers::ALT),
+        ] {
+            app.on_key(KeyEvent::new(code, modifiers));
+        }
+        assert_eq!(query(&app), Some("q1jlpaxcse5/Q"));
+        assert_eq!(snapshot(&app), before);
+        assert!(app.status.is_none());
+
+        // Backspace deletes, and on an empty query keeps search open.
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(query(&app), Some("q1jlpaxcse5/"));
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        assert_eq!(query(&app), Some(""), "still open");
+
+        // Ctrl-C still quits.
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn bright_finds_people_jobs_and_posts() {
+        let mut app = App::new();
+        let want = [
+            ("invitation", "Baptiste Moreau"),
+            ("suggestion", "Mateo Achebe"),
+            ("job", "Developer Advocate at Brightkettle"),
+            ("post", "Tobias Ferreira-Lund"),
+            ("post", "Hana Sorensen"),
+        ]
+        .map(|(kind, name)| (kind, name.to_owned()));
+        assert_eq!(named_hits(&app, "BRIGHT"), want);
+        assert_eq!(named_hits(&app, "brightkettle"), want);
+        assert_eq!(named_hits(&app, "  bRiGhT "), want, "trimmed, any case");
+
+        // Through the keys, too.
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "BRIGHT");
+        assert_eq!(named_hits(&app, query(&app).expect("open")), want);
+
+        // Other fields: a headline, a body, a job location.
+        assert_eq!(named_hits(&app, "recruiter")[0].1, "Ines Okonkwo");
+        assert!(named_hits(&app, "CI queue").contains(&("post", "Maren Holt".to_owned())));
+        assert!(!named_hits(&app, "lisbon").is_empty());
+        // Comments, messages, notifications and news aren't searched.
+        assert!(named_hits(&app, "Number 5 is the real secret").is_empty());
+        assert!(named_hits(&app, "standing desks").is_empty());
+        // An empty or blank query matches nothing.
+        assert!(app.search_hits("").is_empty());
+        assert!(app.search_hits("   ").is_empty());
+    }
+
+    #[test]
+    fn results_follow_the_current_state() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.invitations[1].name, "Baptiste Moreau");
+        press(&mut app, KeyCode::Char('a'));
+        let people: Vec<_> = named_hits(&app, "bright")
+            .into_iter()
+            .filter(|(kind, _)| kind.ends_with("ion"))
+            .collect();
+        assert_eq!(people, [("suggestion", "Mateo Achebe".to_owned())]);
+
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "Rust meetup at Brightkettle");
+        press(&mut app, KeyCode::Enter);
+        let hits = app.search_hits("bright");
+        let first_post = hits
+            .iter()
+            .find(|h| matches!(h, SearchHit::Post(_)))
+            .expect("posts match");
+        assert_eq!(*first_post, SearchHit::Post(0));
+        assert_eq!(app.posts[0].body, "Rust meetup at Brightkettle");
+
+        // Connecting to a suggestion is seen too (the overlay draws it as
+        // Pending; see the ui tests).
+        press(&mut app, KeyCode::Char('2'));
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.search_hits("mateo"), [SearchHit::Suggestion(3)]);
+        assert!(app.suggestions[3].pending);
+    }
+
+    #[test]
+    fn enter_jumps_to_the_selected_result() {
+        let open = |app: &mut App, down: usize| {
+            press(app, KeyCode::Char('/'));
+            type_str(app, "bright");
+            for _ in 0..down {
+                press(app, KeyCode::Down);
+            }
+            press(app, KeyCode::Enter);
+            assert!(app.search.is_none(), "Enter closes search");
+            assert!(app.status.is_none());
+        };
+
+        // Invitation 1.
+        let mut app = App::new();
+        open(&mut app, 0);
+        assert_eq!((app.tab, app.mode), (Tab::Network, Mode::Browse));
+        assert_eq!(app.network_item(), Some(NetworkItem::Invitation(1)));
+
+        // Suggestion 3 sits after the three invitations.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        open(&mut app, 1);
+        assert_eq!(app.tab, Tab::Network);
+        assert_eq!(app.network_sel, 6);
+        assert_eq!(app.network_item(), Some(NetworkItem::Suggestion(3)));
+
+        // The job.
+        let mut app = App::new();
+        open(&mut app, 2);
+        assert_eq!(app.tab, Tab::Jobs);
+        assert_eq!(app.jobs[app.job_sel].company, "Brightkettle");
+
+        // A post, from the post view of another one: lands in the feed.
+        let mut app = App::new();
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('j'));
+        open(&mut app, 4);
+        assert_eq!((app.tab, app.mode), (Tab::Home, Mode::Browse));
+        assert_eq!(app.posts[app.post_sel].author, "Hana Sorensen");
+
+        // And from another tab.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        open(&mut app, 3);
+        assert_eq!((app.tab, app.mode), (Tab::Home, Mode::Browse));
+        assert_eq!(app.post_sel, 1);
+
+        // Reopening starts from an empty query.
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(query(&app), Some(""));
+    }
+
+    #[test]
+    fn enter_without_results_toasts_and_stays_open() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("No results"));
+        assert_eq!(query(&app), Some(""));
+
+        type_str(&mut app, "zqzq");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("No results"));
+        assert_eq!(query(&app), Some("zqzq"), "the query is kept");
+        assert_eq!(app.tab, Tab::Jobs);
+
+        type_str(&mut app, "x");
+        assert!(app.status.is_none(), "the toast clears on the next key");
+    }
+
+    #[test]
+    fn selection_clamps_and_resets_when_the_query_changes() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('/'));
+        // Moving with no results stays at 0.
+        press(&mut app, KeyCode::Down);
+        assert_eq!(selected_hit(&app), 0);
+
+        type_str(&mut app, "bright");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(selected_hit(&app), 0, "clamps at the top");
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(selected_hit(&app), 4, "clamps at the bottom");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(selected_hit(&app), 3);
+
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(selected_hit(&app), 0, "typing resets the selection");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(selected_hit(&app), 0, "so does deleting");
+        assert_eq!(query(&app), Some("bright"));
+    }
+
+    #[test]
+    fn jumping_from_notifications_ends_the_visit() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('5'));
+        let new = |app: &App| app.notifications.iter().filter(|n| n.is_new).count();
+        assert_eq!(new(&app), 3);
+
+        // Esc is still the same visit.
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "bright");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(new(&app), 3);
+
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "bright");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tab, Tab::Network);
+        assert_eq!(new(&app), 0, "leaving by a jump clears the markers");
+        assert_eq!(app.badge(Tab::Notifications), 0);
     }
 }

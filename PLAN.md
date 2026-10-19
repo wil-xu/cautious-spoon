@@ -16,7 +16,8 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
 - It responds the way LinkedIn does: liking posts, opening a post with its
   comments, writing a post, accepting or ignoring invitations, sending
   connection requests, saving jobs and applying, reading and replying to
-  messages, and clearing notifications.
+  messages, and clearing notifications. `/` searches people, jobs and posts
+  and jumps to the result.
 - One self-contained binary. No network, no files written at runtime and no
   real data: all content is hard-coded, fictional and safe for work.
 
@@ -26,7 +27,6 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   concerns).
 - Persisting state between runs. Likes, posts, connections, saved jobs and
   messages reset on restart.
-- A working search box. It is a placeholder, as the brief asks.
 - Mouse support.
 
 ## Build & run
@@ -98,9 +98,9 @@ of line. Don't add them. A unit test checks every seed string, every hint and
 every rendered cell.
 
 **Typed text is the exception.** You can type `日本語` or an emoji into the
-composer or the reply box, so everything in `ui.rs` that wraps, truncates or
-measures text uses display width (`width_of`, which is ratatui's
-`Span::width`), never the `char` count. `head` and `tail` keep the longest
+composer, the reply box or the search box, so everything in `ui.rs` that
+wraps, truncates or measures text uses display width (`width_of`, which is
+ratatui's `Span::width`), never the `char` count. `head` and `tail` keep the longest
 start or end of a string that fits in N columns. `hard_wrap` splits typed text
 into rows of at most N columns, giving a character wider than the row a row of
 its own. `wrap` and `truncate` are built on them. Seed text is single width,
@@ -109,7 +109,7 @@ so for it the two measures agree.
 The screen is a header (3 rows), a body, and a footer (1 row).
 
 - **Header:** the `in` logo in white on LinkedIn blue, a dimmed `⌕ Search`
-  placeholder box, and the tabs
+  box (it shows the query, `⌕ bright▏`, while search is open), and the tabs
   `1 Home  2 My Network  3 Jobs  4 Messaging  5 Notifications`. The active tab
   is white, bold and underlined.
   - **Narrow terminals:** the logo, all five tab numbers and every non-zero
@@ -133,8 +133,8 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     stale.
 - **Footer:** key hints for the current tab and mode. A toast replaces them
   (white on blue) until the next key press. Every hint set fits on one line at
-  80 columns. There are eight sets: Home, post view, composer, My Network,
-  Jobs, Messaging list, reply box and Notifications.
+  80 columns. There are nine sets: Home, post view, composer, My Network,
+  Jobs, Messaging list, reply box, Notifications and search.
 - **Selection:** the selected list row has a blue `▌` bar and a highlighted
   background. The selected feed card and the focused box have a light blue
   border. Lists scroll only once the selection would fall off the bottom.
@@ -216,6 +216,87 @@ the visit. Leaving the tab, by any route, clears the markers, so the next
 visit shows none until something new arrives (in this seeded app, nothing
 does).
 
+### Search
+
+`/` opens a "Search" box centered over the body (at most 80×24, and 4
+columns and 2 rows smaller than the body), over whatever tab and mode were
+showing. Captured from the real binary in a 120×30 tmux pane after typing
+`bright`:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ in    ⌕ bright▏                                1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ You ─────────────────╮╭────────────────────────────────────────────────────────────────╮╭ WorkedIn News ─────────────╮
+│ Jordan Vale       ╭ Search ──────────────────────────────────────────────────────────────────────╮ies                │
+│ Software Engineer │ ⌕ bright▏                                                          5 results │ersus-spaces truce │
+│ Quillfeather Syste│ ──────────────────────────────────────────────────────────────────────────── │ its third week    │
+│                   │  People                                                                      │ · 4,812 readers   │
+│ Connections      3│ ▌Baptiste Moreau                                                             │s report record    │
+│ Saved jobs        │ ▌Frontend Engineer at Brightkettle · Invitation                              │ for standing      │
+╰───────────────────│  Mateo Achebe                                                                │                   │
+                    │  Developer Advocate at Brightkettle · Connect                                │ · 2,960 readers   │
+                    │                                                                              │ stand-ups shorter │
+                    │  Jobs                                                                        │hairs are removed  │
+                    │  Developer Advocate                                                          │ · 1,745 readers   │
+                    │  Brightkettle · Anywhere in Europe · Remote                                  │al apps make a     │
+                    │                                                                              │comeback           │
+                    │  Posts                                                                       │o · 1,203 readers  │
+                    │  Tobias Ferreira-Lund · Product Manager at Brightkettle                      │ay sprints win     │
+                    │  Unpopular opinion: the best meeting is the one that turns into a doc. Writ… │mong small teams   │
+                    │  Hana Sorensen · Data Scientist at Brightkettle                              │ · 986 readers     │
+                    │  Our churn model hit 99% accuracy on the first try. Exciting, until we noti… │───────────────────╯
+                    │                                                                              │
+                    │                                                                              │
+                    │                                                                              │
+                    │                                                                              │
+                    │                                                                              │
+                    ╰──────────────────────────────────────────────────────────────────────────────╯
+                        ╰────────────────────────────────────────────────────────────────╯
+ type search  ↑/↓ move  enter open  esc close
+```
+
+- **Input row** (`search_input`): `⌕ `, the query and a `▏` cursor, and on
+  the right the result count, `5 results` or `1 result`. There is no count
+  for an empty query, and none next to `No results`. A query too wide for the
+  box shows its end (`tail`, by display width). The count goes first: it only
+  shows while the query keeps at least `QUERY_MIN_WIDTH` (10) columns, or all
+  of a shorter one, so `⌕ bright▏  5 results` needs 20 columns and at 19 it
+  is just `⌕ bright▏`. Under the input row, a rule.
+- **Results:** the empty prompt `Type to search people, jobs and posts`, or
+  `No results`, or the results grouped under `People`, `Jobs` and `Posts`
+  headings, in that order. A group with no results has no heading. Each
+  result is two lines:
+  - person: the name, then `headline · Invitation` (or `· Connect` /
+    `· Pending` for a suggestion). The label always shows; the headline is cut
+    with `…` to make room,
+  - job: the title, then `company · location · Remote/Hybrid/On-site`,
+  - post: `author · headline`, then the body on one line, newlines shown as
+    spaces, cut with `…`. When that line would hide the body's first match
+    (`body_line`), it shows an excerpt instead: `…`, a few words before the
+    match, the match, then as much as fits, cut with `…`. `skipped` shows
+    `…a suite that had been skipped since before most of us joined. Small
+    borin…` rather than the start of Maren Holt's post. The context gets up to
+    a third of the row; when the rest of the body fits after the match and
+    leaves more than that, the context takes all of it and the end shows
+    uncut. `excerpt_start` starts the context on a word, so no word is cut at
+    the start, except when the nearest word start doesn't fit (a long word,
+    or CJK text, which has no spaces): then it keeps as much of the end as
+    fits, by display width. A match already visible from the start keeps the
+    plain line.
+- **Highlight:** on each line, the first match of the query in a searched
+  field (not in a separator or label) that fits before the `…` is bold.
+  Nothing else in the results is bold, so bold always means "match".
+  `match_ranges` finds matches in `text.to_lowercase()` and maps them back to
+  whole characters of the original, because lowercasing can change length
+  (`İ` becomes `i` plus a combining dot).
+- **Selection:** the selected result gets the usual `▌` bar and background,
+  and the list scrolls with `first_visible` (via `render_list`) to keep it in
+  view. Headings are list items too, but never selected.
+- **Header:** when the header has room for its search box, the box shows the
+  end of the query and the cursor. `header_fit` doesn't look at search, so the
+  header lays out the same with search open or closed.
+
 ## Data model (`src/data.rs`)
 
 ```rust
@@ -261,6 +342,7 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 | `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs |
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
 | `draft`, `reply` | composer and reply box text |
+| `search: Option<Search>` | `Some { query, selected }` while search is open. `selected` indexes `App::search_hits` |
 | `status: Option<&'static str>` | toast text. Every toast is a fixed string. Cleared on the next key press |
 | `should_quit` | checked by the event loop in `main.rs` |
 
@@ -269,6 +351,17 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 
 - **Derived counts:** badges (`App::badge`) and saved jobs
   (`App::saved_jobs`) are computed when asked, never stored.
+- **Search results** are never stored either. `App::search_hits(query)`
+  recomputes them from the current state each time, as `SearchHit` values
+  (`Invitation(i)`, `Suggestion(i)`, `Job(i)`, `Post(i)`) indexing the live
+  lists. The query is trimmed and lowercased (`search_needle`), and a field
+  matches when its `to_lowercase()` contains that. Fields: invitation and
+  suggestion name and headline; job title, company and location; post author,
+  headline and body. Comments, conversations, notifications and news aren't
+  searched. A query that is empty once trimmed matches nothing.
+- **Search sits on top of `mode`.** Opening it leaves `tab`, `mode` and every
+  selection alone, so Esc (`search = None`) puts back exactly what was there,
+  including the post view and its selected comment.
 - **Switching tabs** (with `1`-`5`, `Tab` or `BackTab`) closes the post view,
   so coming back to Home shows the feed with the same post selected.
   Entering Notifications from another tab copies each `unread` into `is_new`
@@ -286,13 +379,14 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 
 **Global:** Ctrl-C quits from any mode, including the text boxes.
 
-Everywhere except the composer and the reply box:
+Everywhere except the composer, the reply box and search:
 
 | Key | Action |
 |---|---|
 | `1`-`5` | switch tab |
 | `Tab` / `Shift-Tab` | next / previous tab, wrapping both ways |
 | `j`/`↓`, `k`/`↑` | move the selection in the current list (comments in the post view) |
+| `/` | open search (also from the post view) |
 | `Esc` | close the post view. Otherwise nothing, so it never quits |
 | `q` | quit |
 
@@ -319,6 +413,26 @@ and toasts "Post published", or toasts "Write something first" and stays open
 when the draft is empty or only whitespace. `Esc` discards the draft. `Tab`
 does nothing.
 
+**Search:** a text box like the composer. Every printable key without Ctrl
+or Alt is typed, including `q`, `j`, `k`, `l`, `p`, `a`, `x`, `c`, `s`, `e`,
+`/` and `1`-`5`, and does nothing else. `Backspace` deletes, and does nothing
+on an empty query (search stays open). `↓`/`↑` move through the results,
+stopping at both ends. Any change to the query selects the first result
+again. `Enter` closes search and goes to the selected result, switching tabs
+the way `1`-`5` do (so leaving Notifications ends the visit):
+
+| Result | Lands on |
+|---|---|
+| invitation `i` | My Network, `network_sel = i` |
+| suggestion `i` | My Network, `network_sel = invitations + i` |
+| job `i` | Jobs, `job_sel = i` |
+| post `i` | Home feed (not the post view), `post_sel = i` |
+
+`Enter` with no results, or an empty query, toasts "No results" and keeps
+search open with the query. `Esc` closes it and discards the query. `Tab`,
+`BackTab` and every Ctrl- or Alt-modified key do nothing (Ctrl-C still
+quits).
+
 **Reply box:** printable keys are typed the same way. `Enter` appends the
 reply to the thread as yours, clears the box and keeps focus. An empty or
 whitespace-only reply does nothing. `Esc` discards the text and returns focus
@@ -333,7 +447,7 @@ workedin/
   Cargo.lock
   src/
     main.rs     ratatui::init()/restore() plus cursor::Show, the panic hook, the event loop
-    app.rs      state, key handling, badges. No rendering, no I/O
+    app.rs      state, key handling, badges, search. No rendering, no I/O
     data.rs     seed profile, posts, news, people, jobs, conversations, notifications
     ui.rs       draw(frame, &App): all rendering, pure
 ```
@@ -348,9 +462,9 @@ visible.
 
 ## Testing
 
-39 unit tests, run with `cargo test` (about 5 s):
+62 unit tests, run with `cargo test` (about 6 s):
 
-- **`app.rs`** (20), on the seed data:
+- **`app.rs`** (29), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -374,17 +488,38 @@ visible.
     them, and the next visit has none, with the badge still at 0.
   - `Tab` and `BackTab` wrap in both directions.
   - `q` quits, Esc doesn't, and toasts clear on the next key.
-- **`ui.rs`** (19), rendering into a `TestBackend`:
+  - Search, opening and closing: `/` opens it from Browse on every tab and
+    from the post view. Esc restores the tab, the mode (with the selected
+    comment), all five selections, the open thread and the Notifications
+    markers. `/` is typed in the composer and the reply box.
+  - Search typing: `q1jlpaxcse5/` on My Network is typed, with no quit, tab
+    switch, move, accept, ignore or connect. Shift is fine. `Tab`, `BackTab`
+    and Ctrl/Alt keys change nothing. Backspace on an empty query keeps search
+    open. Ctrl-C quits.
+  - `BRIGHT`, `brightkettle` and `  bRiGhT ` give exactly Baptiste Moreau,
+    Mateo Achebe, Developer Advocate at Brightkettle, then Tobias
+    Ferreira-Lund's and Hana Sorensen's posts. Headlines, bodies and
+    locations match. Comments, news and blank queries don't.
+  - Live results: an accepted invitation drops out, a published
+    `Rust meetup at Brightkettle` is the first post result, and a connected
+    suggestion is pending.
+  - `Enter` on each kind of result lands on the right tab and selection; the
+    post jump lands in the feed even from the post view. No results toasts
+    "No results" and stays open. The selection clamps at both ends and goes
+    back to the first result when the query changes. Jumping from
+    Notifications clears its markers, Esc doesn't.
+- **`ui.rs`** (33), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 11 states:
+  - Every size from 1×1 to 140×40 renders without panicking, for 15 states:
     Home, post view, composer (empty and with text), My Network (invitation
     and suggestion selected), Jobs (with and without a toast), Messaging,
-    reply box and Notifications. One thread per state.
+    reply box, Notifications, and search (with matches, empty, no match, and
+    over the post view). One thread per state.
   - Card counts and `Like` → `Liked`. A published post renders first with
     `now`. The post view shows the full body and comments.
   - Badges in the header follow every count and disappear at 0.
@@ -408,12 +543,64 @@ visible.
     Network tabs.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
-  - Each of the eight hint sets is at most 80 columns, and is what the footer
+  - Each of the nine hint sets is at most 80 columns, and is what the footer
     shows at 80×24.
   - No seed string, tab label or hint contains a character that isn't single
-    width, and no rendered cell on any screen holds one.
+    width, and no rendered cell on any screen holds one. The same goes for
+    every search label.
+  - Search overlay at 120×30: the input row, the headings in order, each
+    result's two lines (including the `· Invitation` / `· Connect` labels and
+    a body cut with `…`), the header box showing the query, no heading for an
+    empty group, the empty prompt (also for a blank query) and `No results`.
+    A long result list scrolls to the selection, and a connected suggestion
+    shows `· Pending`.
+  - Result count: `5 results` for `bright`, `1 result` for `lisbon`, nothing
+    for an empty query or next to `No results`, and a 68-column query keeps
+    both its end and `1 result` at 120 columns. `search_input` at every width
+    from 40 down to 3: once the count is gone it doesn't come back, and
+    whenever it shows, all of `bright` shows too (20 columns with the count,
+    19 without), and a long query keeps at least 10 columns of its end next to
+    the count and fills the row without it.
+  - Excerpts: `excerpt_start` starts on a word, never on a space, and cuts
+    only a word, or CJK text, wider than the budget. `body_line` matches the
+    plain line when the match is visible (or absent), and otherwise gives
+    `…`, whole words, the bold match and `…`, also for `İstanbul`, and never
+    wider than the row at any width up to 40. Rendered: `skipped` gives an
+    excerpt starting on a word of Maren Holt's body with only `skipped` bold.
+    A match at the end of a long published body shows that end uncut, at
+    most one word short of the row. In a CJK body, `東京駅` is the only bold
+    run and the row fits the box; when the rest fits it shows uncut (at 120
+    and 60 columns), and a long rest is cut with `…`. `CI queue`, visible
+    from the start, keeps `I'm happy to share…`.
+  - Highlighting: `match_ranges` on `İstanbul`, overlapping matches, a final
+    sigma and CJK, and `hit_line` only bolding a match that fits before the
+    `…` and is in a searched part. With `İstanbul office opening` published,
+    `stan` finds the post and the only bold cells read exactly `stan` (at 120,
+    60 and 30 columns, and none at 12, where the match is cut off). `日本語`
+    bolds exactly `日本語`, and `BRIGHT` gives five bold runs, all `Bright`.
+  - For an empty query, `bright`, a 3,000-character query mixing `日本語` and
+    ASCII, and a query matching nothing, every size from 1×1 to 140×40
+    renders, and every row of the overlay starts and ends with its border and
+    is exactly the box's width, measured by display width. The long query
+    shows its end in the input row and the header box, and the header keeps
+    the logo, all five numbers and the badges at 140, 120, 80, 70 and 60
+    columns.
+
+These were checked by breaking the code on purpose and restoring it:
+case-sensitive matching fails 8 tests (including the `BRIGHT` one), taking
+highlight offsets from the lowercased string fails the `match_ranges` and
+`İstanbul` highlight tests, making Esc fall back to Browse fails the Esc
+restore test, not resetting the selection when typing fails the selection
+test, and showing the start of a long query instead of its end fails the
+every-size border test. For the excerpt and the count: starting the context
+wherever the width allows instead of on a word fails 4 tests (including
+`excerpt_starts_on_a_word_unless_the_word_is_too_wide` and the `skipped`
+one), always showing the plain body line fails 4 (including the `skipped`,
+end-of-body and CJK ones), measuring the rest of the body by `char` count
+fails the CJK excerpt test, and keeping the count however narrow the row
+fails `the_count_goes_before_the_end_of_the_query`.
 
 ## Ideas
 
-Comment and repost actions, a working search, scrolling long job descriptions,
-profile pages, mouse support.
+Comment and repost actions, searching comments and messages, scrolling long
+job descriptions, profile pages, mouse support.

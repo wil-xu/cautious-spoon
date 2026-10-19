@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use ratatui::Frame;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -17,7 +19,10 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::app::Mode;
 use crate::app::NetworkItem;
+use crate::app::Search;
+use crate::app::SearchHit;
 use crate::app::Tab;
+use crate::app::search_needle;
 use crate::data::Post;
 
 const BLUE: Color = Color::Rgb(10, 102, 194);
@@ -251,13 +256,18 @@ fn render_list(
     }
 }
 
-pub(crate) fn draw(frame: &mut Frame, app: &App) {
-    let [header, body, footer] = Layout::vertical([
+/// The header, body and footer of a screen of size `area`.
+fn screen_areas(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(area)
+}
+
+pub(crate) fn draw(frame: &mut Frame, app: &App) {
+    let [header, body, footer] = screen_areas(frame.area());
 
     render_header(frame, app, header);
     render_footer(frame, app, footer);
@@ -270,6 +280,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     }
     if app.mode == Mode::Composer {
         render_composer(frame, app, body);
+    }
+    if let Some(search) = &app.search {
+        render_search(frame, app, search, body);
     }
 }
 
@@ -394,14 +407,22 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(tabs_width)])
                 .spacing(HEADER_GAP)
                 .areas(rest);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
+        let text = match &app.search {
+            // Two columns of padding and the icon, then the cursor.
+            Some(s) => vec![
+                Span::styled(" ⌕ ", Style::new().fg(LIGHT_BLUE)),
+                Span::styled(
+                    tail(&s.query, usize_of(search.width).saturating_sub(4)).to_owned(),
+                    Style::new().fg(Color::White),
+                ),
+                Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
+            ],
+            None => vec![
                 Span::styled(" ⌕ ", Style::new().fg(DIM)),
                 Span::styled("Search", Style::new().fg(DIM)),
-            ]))
-            .bg(HIGHLIGHT_BG),
-            search,
-        );
+            ],
+        };
+        frame.render_widget(Paragraph::new(Line::from(text)).bg(HIGHLIGHT_BG), search);
         frame.render_widget(tabs, tabs_area);
     } else if tabs_width <= rest.width {
         frame.render_widget(tabs.right_aligned(), rest);
@@ -414,6 +435,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 /// Key hints for the current tab and mode. Each set fits on one line at 80
 /// columns.
 fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
+    if app.search.is_some() {
+        return &[
+            ("type", "search"),
+            ("↑/↓", "move"),
+            ("enter", "open"),
+            ("esc", "close"),
+        ];
+    }
     match (app.tab, app.mode) {
         (_, Mode::Composer) => &[
             ("type", "write"),
@@ -774,6 +803,337 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         lines.extend(text.into_iter().skip(skip).map(Line::raw));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// -------------------------------------------------------------- Search
+
+const SEARCH_PROMPT: &str = "Type to search people, jobs and posts";
+const NO_RESULTS: &str = "No results";
+
+/// Where the search overlay goes over the body.
+fn search_area(body: Rect) -> Rect {
+    centered(
+        body,
+        body.width.saturating_sub(4).min(80),
+        body.height.saturating_sub(2).min(24),
+    )
+}
+
+/// The byte ranges of `text` that match `needle`, a lowercased query, in
+/// order. The match runs on `text.to_lowercase()`, as `App::search_hits`
+/// does, but lowercasing can change a string's length (`İ` becomes two
+/// characters), so each range is mapped back to whole characters of `text`.
+fn match_ranges(text: &str, needle: &str) -> Vec<Range<usize>> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    // `(offset in lower, offset in text)` at every character of `text`, and
+    // at the end. `str::to_lowercase` lowercases each character on its own,
+    // except for a final `Σ`, whose two forms are the same length.
+    let lower = text.to_lowercase();
+    let mut bounds = Vec::new();
+    let mut at = 0;
+    for (i, ch) in text.char_indices() {
+        bounds.push((at, i));
+        at += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    bounds.push((at, text.len()));
+    debug_assert_eq!(at, lower.len());
+    // The character of `text` that holds byte `at` of `lower`, or the next
+    // one when `up` and `at` falls inside a character.
+    let to_text = |at: usize, up: bool| match bounds.binary_search_by_key(&at, |&(l, _)| l) {
+        Ok(k) => bounds[k].1,
+        Err(k) if up => bounds[k.min(bounds.len() - 1)].1,
+        Err(k) => bounds[k - 1].1,
+    };
+
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(needle) {
+        let start = from + found;
+        ranges.push(to_text(start, false)..to_text(start + needle.len(), true));
+        // Matches may overlap: carry on from the next character.
+        from = start + lower[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    ranges
+}
+
+/// One line of a search result, cut to `width` columns with `…`. Each part is
+/// `(text, style, searched)`, and the first match of `needle` in a searched
+/// part that fits in `width` is drawn bold.
+fn hit_line(parts: &[(&str, Style, bool)], needle: &str, width: usize) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let full: String = parts.iter().map(|&(text, ..)| text).collect();
+    let cut = width_of(&full) > width;
+    let shown = if cut {
+        head(&full, width - 1).len()
+    } else {
+        full.len()
+    };
+
+    let mut mark: Option<Range<usize>> = None;
+    let mut start = 0;
+    for &(text, _, searched) in parts {
+        if mark.is_none() && searched {
+            mark = match_ranges(text, needle)
+                .into_iter()
+                .map(|r| start + r.start..start + r.end)
+                .find(|r| r.end <= shown);
+        }
+        start += text.len();
+    }
+
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for &(text, style, _) in parts {
+        let (lo, hi) = (start.min(shown), (start + text.len()).min(shown));
+        let mut cuts = vec![lo, hi];
+        if let Some(m) = &mark {
+            cuts.extend([m.start, m.end].into_iter().filter(|&b| lo < b && b < hi));
+        }
+        cuts.sort_unstable();
+        for pair in cuts.windows(2) {
+            let piece = pair[0]..pair[1];
+            if piece.is_empty() {
+                continue;
+            }
+            let bold = mark
+                .as_ref()
+                .is_some_and(|m| m.start <= piece.start && piece.end <= m.end);
+            let style = if bold {
+                style.fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                style
+            };
+            spans.push(Span::styled(full[piece].to_owned(), style));
+        }
+        start += text.len();
+    }
+    if cut {
+        spans.push(Span::styled("…", Style::new().fg(DIM)));
+    }
+    spans
+}
+
+/// Where an excerpt's context starts, as a byte offset into `text`: the
+/// earliest word start whose text up to `at` fits in `budget` columns, so no
+/// word is cut at the start. When no word start fits (a word, or CJK text
+/// without spaces, is wider than `budget`), as much of the end as fits.
+fn excerpt_start(text: &str, at: usize, budget: usize) -> usize {
+    let before = &text[..at];
+    let word_start = |i: usize| i == 0 || before[..i].ends_with(char::is_whitespace);
+    // A match that starts a word needs no context to stay whole.
+    let mut start = word_start(at).then_some(at);
+    let mut fallback = at;
+    for (i, _) in before.char_indices().rev() {
+        if width_of(&before[i..]) > budget {
+            break;
+        }
+        fallback = i;
+        if word_start(i) && !before[i..].starts_with(char::is_whitespace) {
+            start = Some(i);
+        }
+    }
+    let start = start.unwrap_or(fallback);
+    // Never lead with a space.
+    at - before[start..].trim_start().len()
+}
+
+/// A post's body on one line, cut with `…`. When that hides the body's first
+/// match, an excerpt instead: `…`, a few words before the match, the match,
+/// then as much as fits.
+fn body_line(body: &str, needle: &str, style: Style, width: usize) -> Vec<Span<'static>> {
+    let line = hit_line(&[(body, style, true)], needle, width);
+    let Some(first) = match_ranges(body, needle).into_iter().next() else {
+        return line;
+    };
+    let shown = if width_of(body) > width {
+        head(body, width.saturating_sub(1)).len()
+    } else {
+        body.len()
+    };
+    if first.end <= shown || width == 0 {
+        return line;
+    }
+    // The room after the leading `…`. The context gets a third of it, or,
+    // when the rest of the body fits after it, whatever the rest leaves, if
+    // that's more. Otherwise the end is cut with `…`.
+    let room = width - 1;
+    let rest = width_of(&body[first.start..]);
+    let cut_budget = (room / 3).min(room.saturating_sub(width_of(&body[first.clone()]) + 1));
+    let budget = if rest <= room {
+        cut_budget.max(room - rest)
+    } else {
+        cut_budget
+    };
+    let start = excerpt_start(body, first.start, budget);
+    let mut spans = vec![Span::styled("…", Style::new().fg(DIM))];
+    spans.extend(hit_line(&[(&body[start..], style, true)], needle, room));
+    spans
+}
+
+/// The query keeps at least this many columns (or all of a shorter query)
+/// before the result count shows.
+const QUERY_MIN_WIDTH: usize = 10;
+
+/// The search box's first row: `⌕ `, the end of the query and the cursor,
+/// then `N results` on the right. The count goes first when the row is too
+/// narrow, so the end of the query, which was just typed, stays in view.
+fn search_input(query: &str, results: usize, width: usize) -> Line<'static> {
+    // The icon and the cursor.
+    let fixed = 3;
+    let keep = width_of(query).min(QUERY_MIN_WIDTH);
+    let label = Some(results)
+        .filter(|&n| n > 0)
+        .map(|n| count(u32::try_from(n).unwrap_or(u32::MAX), "result"))
+        .filter(|label| fixed + keep + 2 + width_of(label) <= width);
+    let room = width.saturating_sub(fixed + label.as_deref().map_or(0, |l| width_of(l) + 2));
+    let left = vec![
+        Span::styled("⌕ ", Style::new().fg(LIGHT_BLUE)),
+        Span::styled(tail(query, room).to_owned(), Style::new().fg(Color::White)),
+        Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
+    ];
+    match label {
+        Some(label) => spread(left, vec![Span::styled(label, Style::new().fg(DIM))], width),
+        None => Line::from(left),
+    }
+}
+
+fn search_group(hit: SearchHit) -> &'static str {
+    match hit {
+        SearchHit::Invitation(_) | SearchHit::Suggestion(_) => "People",
+        SearchHit::Job(_) => "Jobs",
+        SearchHit::Post(_) => "Posts",
+    }
+}
+
+/// A result's two lines. Only bold text is a match, so nothing else is bold.
+fn hit_lines(app: &App, hit: SearchHit, needle: &str, width: usize) -> Vec<Line<'static>> {
+    let white = Style::new().fg(Color::White);
+    let gray = Style::new().fg(Color::Gray);
+    let dim = Style::new().fg(DIM);
+    let person = |name: &str, headline: &str, label: &'static str| {
+        let label = format!(" · {label}");
+        let mut second = hit_line(
+            &[(headline, dim, true)],
+            needle,
+            width.saturating_sub(width_of(&label)),
+        );
+        second.push(Span::styled(label, Style::new().fg(LIGHT_BLUE)));
+        vec![
+            Line::from(hit_line(&[(name, white, true)], needle, width)),
+            Line::from(second),
+        ]
+    };
+    match hit {
+        SearchHit::Invitation(i) => {
+            let p = &app.invitations[i];
+            person(p.name, p.headline, "Invitation")
+        }
+        SearchHit::Suggestion(i) => {
+            let s = &app.suggestions[i];
+            let label = if s.pending { "Pending" } else { "Connect" };
+            person(s.person.name, s.person.headline, label)
+        }
+        SearchHit::Job(i) => {
+            let job = &app.jobs[i];
+            vec![
+                Line::from(hit_line(
+                    &[(job.title, Style::new().fg(LIGHT_BLUE), true)],
+                    needle,
+                    width,
+                )),
+                Line::from(hit_line(
+                    &[
+                        (job.company, white, true),
+                        (" · ", dim, false),
+                        (job.location, gray, true),
+                        (" · ", dim, false),
+                        (job.workplace.label(), dim, false),
+                    ],
+                    needle,
+                    width,
+                )),
+            ]
+        }
+        SearchHit::Post(i) => {
+            let post = &app.posts[i];
+            // Same length as the body, so match offsets carry over.
+            let body = post.body.replace('\n', " ");
+            vec![
+                Line::from(hit_line(
+                    &[
+                        (post.author, white, true),
+                        (" · ", dim, false),
+                        (post.headline, dim, true),
+                    ],
+                    needle,
+                    width,
+                )),
+                Line::from(body_line(&body, needle, gray, width)),
+            ]
+        }
+    }
+}
+
+fn render_search(frame: &mut Frame, app: &App, search: &Search, body: Rect) {
+    let popup = search_area(body);
+    frame.render_widget(Clear, popup);
+    let block = card(" Search ", true);
+    let inner = block.inner(popup);
+    let width = usize_of(inner.width);
+    frame.render_widget(block, popup);
+    let [input, rule, results] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    let needle = search_needle(&search.query);
+    let hits = app.search_hits(&search.query);
+    frame.render_widget(search_input(&search.query, hits.len(), width), input);
+    frame.render_widget(
+        Line::styled("─".repeat(width), Style::new().fg(BORDER)),
+        rule,
+    );
+    if hits.is_empty() {
+        let text = if needle.is_empty() {
+            SEARCH_PROMPT
+        } else {
+            NO_RESULTS
+        };
+        frame.render_widget(
+            Line::styled(truncate(text, width), Style::new().fg(DIM)),
+            results,
+        );
+        return;
+    }
+
+    // One column goes to the selection bar.
+    let width = width.saturating_sub(1);
+    let mut items = Vec::new();
+    let mut selected = None;
+    let mut group = None;
+    for (i, &hit) in hits.iter().enumerate() {
+        let heading = search_group(hit);
+        if group != Some(heading) {
+            let mut lines = Vec::new();
+            if group.is_some() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled(heading, Style::new().fg(LIGHT_BLUE)));
+            items.push(lines);
+            group = Some(heading);
+        }
+        if i == search.selected {
+            selected = Some(items.len());
+        }
+        items.push(hit_lines(app, hit, &needle, width));
+    }
+    render_list(frame, results, items, selected);
 }
 
 // ---------------------------------------------------------- My Network
@@ -1228,6 +1588,21 @@ mod tests {
                 at(&[KeyCode::Char('4'), KeyCode::Enter], "a reply in progress"),
             ),
             ("notifications", at(&[KeyCode::Char('5')], "")),
+            ("search", at(&[KeyCode::Char('/')], "bright")),
+            ("search empty", at(&[KeyCode::Char('/')], "")),
+            ("search no match", at(&[KeyCode::Char('/')], "zqzq")),
+            (
+                "search over post",
+                at(
+                    &[
+                        KeyCode::Char('j'),
+                        KeyCode::Enter,
+                        KeyCode::Char('j'),
+                        KeyCode::Char('/'),
+                    ],
+                    "hana",
+                ),
+            ),
         ]
     }
 
@@ -1544,7 +1919,7 @@ mod tests {
                 seen.push(set.as_ptr());
             }
         }
-        assert_eq!(seen.len(), 8, "every hint set was checked");
+        assert_eq!(seen.len(), 9, "every hint set was checked");
     }
 
     fn header_row(app: &App, width: u16, height: u16) -> String {
@@ -1825,5 +2200,611 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Where the search overlay is on a `width`×`height` screen.
+    fn search_popup(width: u16, height: u16) -> Rect {
+        search_area(screen_areas(Rect::new(0, 0, width, height))[1])
+    }
+
+    /// Each row inside the search overlay's border, trimmed.
+    fn search_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let buf = buffer(app, width, height);
+        let popup = search_popup(width, height);
+        (popup.top() + 1..popup.bottom() - 1)
+            .map(|y| {
+                text_between(&buf, y, popup.left() + 1, popup.right() - 1)
+                    .trim()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The runs of bold cells inside `area`, row by row.
+    fn bold_runs(buf: &Buffer, area: Rect) -> Vec<String> {
+        let mut runs = Vec::new();
+        for y in area.top()..area.bottom() {
+            let mut run = String::new();
+            let mut x = area.left();
+            while x < area.right() {
+                let cell = &buf[(x, y)];
+                if cell.modifier.contains(Modifier::BOLD) {
+                    run.push_str(cell.symbol());
+                } else if !run.is_empty() {
+                    runs.push(std::mem::take(&mut run));
+                }
+                x += u16_of(width_of(cell.symbol()).max(1));
+            }
+            if !run.is_empty() {
+                runs.push(run);
+            }
+        }
+        runs
+    }
+
+    fn searching(text: &str) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, text);
+        app
+    }
+
+    #[test]
+    fn search_overlay_groups_results_under_headings() {
+        let app = searching("bright");
+        let rows = search_rows(&app, 120, 30);
+        assert!(rows[0].starts_with("⌕ bright▏ "), "{rows:#?}");
+        assert!(rows[0].ends_with(" 5 results"), "{rows:#?}");
+        let at = |want: &str| {
+            rows.iter()
+                .position(|r| r == want)
+                .unwrap_or_else(|| panic!("no row {want:?} in {rows:#?}"))
+        };
+        let (people, jobs, posts) = (at("People"), at("Jobs"), at("Posts"));
+        assert!(people < jobs && jobs < posts, "{rows:#?}");
+        // Two lines per result, the selected one with the bar.
+        for (offset, want) in [
+            (1, "▌Baptiste Moreau"),
+            (2, "▌Frontend Engineer at Brightkettle · Invitation"),
+            (3, "Mateo Achebe"),
+            (4, "Developer Advocate at Brightkettle · Connect"),
+        ] {
+            assert_eq!(rows[people + offset], want, "{rows:#?}");
+        }
+        assert_eq!(rows[jobs + 1], "Developer Advocate");
+        assert_eq!(rows[jobs + 2], "Brightkettle · Anywhere in Europe · Remote");
+        assert_eq!(
+            rows[posts + 1],
+            "Tobias Ferreira-Lund · Product Manager at Brightkettle"
+        );
+        // The body on one line, newline as a space, cut with `…`.
+        let body = &rows[posts + 2];
+        assert!(
+            body.starts_with(
+                "Unpopular opinion: the best meeting is the one that turns into a doc. Wri"
+            ),
+            "{body:?}"
+        );
+        assert!(body.ends_with('…'), "{body:?}");
+        assert_eq!(
+            rows[posts + 3],
+            "Hana Sorensen · Data Scientist at Brightkettle"
+        );
+
+        // The header's search box shows the query.
+        let header = header_row(&app, 120, 30);
+        assert!(header.contains("⌕ bright▏"), "{header:?}");
+        assert!(!header.contains("Search"), "{header:?}");
+
+        // Groups with no results have no heading.
+        let rows = search_rows(&searching("baptiste"), 120, 30);
+        assert!(rows.contains(&"People".to_owned()), "{rows:#?}");
+        assert!(!rows.contains(&"Jobs".to_owned()) && !rows.contains(&"Posts".to_owned()));
+
+        let rows = search_rows(&searching(""), 120, 30);
+        assert_eq!(rows[2], SEARCH_PROMPT, "{rows:#?}");
+        let rows = search_rows(&searching("zqzq"), 120, 30);
+        assert_eq!(rows[2], NO_RESULTS, "{rows:#?}");
+        assert!(!rows.contains(&"People".to_owned()));
+        // Only spaces is no query at all.
+        let rows = search_rows(&searching("   "), 120, 30);
+        assert_eq!(rows[2], SEARCH_PROMPT, "{rows:#?}");
+    }
+
+    #[test]
+    fn search_overlay_scrolls_to_the_selection_and_follows_state() {
+        // "a" matches more results than fit: the last stays visible.
+        let mut app = searching("a");
+        let total = app.search_hits("a").len();
+        for _ in 0..total {
+            press(&mut app, KeyCode::Down);
+        }
+        let rows = search_rows(&app, 80, 24);
+        let last = rows.iter().rposition(|r| r.starts_with('▌'));
+        assert!(last.is_some(), "selection visible: {rows:#?}");
+        assert!(!rows.contains(&"People".to_owned()), "scrolled: {rows:#?}");
+
+        // A suggestion you've connected to shows Pending.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('2'));
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "mateo");
+        let rows = search_rows(&app, 120, 30);
+        assert!(
+            rows.contains(&"▌Developer Advocate at Brightkettle · Pending".to_owned()),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn match_ranges_map_back_to_the_original_text() {
+        let ranges = |text: &str, needle: &str| -> Vec<(usize, usize)> {
+            match_ranges(text, needle)
+                .into_iter()
+                .map(|r| (r.start, r.end))
+                .collect()
+        };
+        assert_eq!(ranges("Brightkettle", "bright"), [(0, 6)]);
+        assert_eq!(ranges("aaa", "aa"), [(0, 2), (1, 3)], "overlapping");
+        assert_eq!(ranges("abc", ""), []);
+        // `İ` (2 bytes) lowercases to `i` plus a combining dot (3 bytes).
+        assert_eq!(ranges("İstanbul", "stan"), [(2, 6)]);
+        assert_eq!(ranges("xİstanbul", "i̇stan"), [(1, 7)]);
+        // A match that covers part of a character covers all of it.
+        assert_eq!(ranges("İstanbul", "i"), [(0, 2)]);
+        // A final sigma lowercases to `ς`, as in `App::search_hits`.
+        assert_eq!(ranges("ΟΔΟΣ", "οδος"), [(0, 8)]);
+        assert_eq!(ranges("会議は日本語で", "日本語"), [(9, 18)]);
+
+        let style = Style::new();
+        let bold = |spans: &[Span]| -> Vec<String> {
+            spans
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+                .map(|s| s.content.to_string())
+                .collect()
+        };
+        let line = hit_line(&[("a Bright b", style, true)], "bright", 20);
+        assert_eq!(bold(&line), ["Bright"]);
+        // Only the part of the line that fits counts.
+        let line = hit_line(&[("abc bright", style, true)], "bright", 8);
+        assert!(bold(&line).is_empty(), "{line:?}");
+        let line = hit_line(&[("abc bright bright", style, true)], "bright", 8);
+        assert!(bold(&line).is_empty(), "{line:?}");
+        // Unsearched parts never highlight.
+        let line = hit_line(
+            &[("bright", style, false), (" x bright", style, true)],
+            "bright",
+            20,
+        );
+        assert_eq!(bold(&line), ["bright"]);
+        assert_eq!(line[0].content, "bright");
+        assert!(!line[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(hit_line(&[("abc", style, true)], "b", 0).is_empty());
+    }
+
+    #[test]
+    fn search_highlights_exactly_the_match() {
+        let publish = |text: &str| {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, text);
+            press(&mut app, KeyCode::Enter);
+            press(&mut app, KeyCode::Char('/'));
+            app
+        };
+
+        let mut app = publish("İstanbul office opening");
+        type_str(&mut app, "stan");
+        assert_eq!(app.search_hits("stan"), [SearchHit::Post(0)]);
+        for (width, height) in [(120, 30), (60, 20), (30, 12), (12, 8)] {
+            let buf = buffer(&app, width, height);
+            let popup = search_popup(width, height);
+            let runs = bold_runs(&buf, popup.inner(ratatui::layout::Margin::new(1, 1)));
+            if width >= 30 {
+                assert_eq!(runs, ["stan"], "{width}x{height}");
+            } else {
+                assert!(runs.is_empty(), "the match doesn't fit: {runs:?}");
+            }
+        }
+        let rows = search_rows(&app, 120, 30);
+        assert!(
+            rows.contains(&"▌İstanbul office opening".to_owned()),
+            "{rows:#?}"
+        );
+
+        let mut app = publish("会議は日本語で行います");
+        type_str(&mut app, "日本語");
+        let buf = buffer(&app, 120, 30);
+        let popup = search_popup(120, 30);
+        let runs = bold_runs(&buf, popup.inner(ratatui::layout::Margin::new(1, 1)));
+        assert_eq!(runs, ["日本語"]);
+
+        // Every bold run in a busy overlay is a match.
+        let app = searching("BRIGHT");
+        let buf = buffer(&app, 120, 30);
+        let popup = search_popup(120, 30);
+        let runs = bold_runs(&buf, popup.inner(ratatui::layout::Margin::new(1, 1)));
+        assert_eq!(runs, ["Bright"; 5]);
+    }
+
+    #[test]
+    fn search_overlay_stays_inside_its_border_at_every_size() {
+        let long: String = "日本語 search".repeat(300);
+        assert_eq!(long.chars().count(), 3_000);
+        let states = [
+            ("empty", searching("")),
+            ("matches", searching("bright")),
+            ("long", searching(&long)),
+            ("no match", searching("zqzq")),
+        ];
+        std::thread::scope(|scope| {
+            for (name, app) in &states {
+                scope.spawn(move || {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            let popup = search_popup(width, height);
+                            if popup.width < 2 || popup.height < 2 {
+                                continue;
+                            }
+                            let buf = terminal.backend().buffer();
+                            for y in popup.top()..popup.bottom() {
+                                let row = text_between(buf, y, popup.left(), popup.right());
+                                let ends = match y {
+                                    y if y == popup.top() => ('╭', '╮'),
+                                    y if y == popup.bottom() - 1 => ('╰', '╯'),
+                                    _ => ('│', '│'),
+                                };
+                                assert!(
+                                    row.starts_with(ends.0)
+                                        && row.ends_with(ends.1)
+                                        && width_of(&row) == usize_of(popup.width),
+                                    "{name} at {width}x{height}, row {y}: {row:?}"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        // The input row and the header box show the end of a long query.
+        let app = &states[2].1;
+        let rows = search_rows(app, 120, 30);
+        let shown = rows[0]
+            .strip_prefix("⌕ ")
+            .and_then(|r| r.strip_suffix('▏'))
+            .expect("icon and cursor");
+        assert!(width_of(shown) > 60, "{shown:?}");
+        assert!(long.ends_with(shown), "{shown:?}");
+        let header = header_row(app, 120, 30);
+        assert!(header.contains("search▏"), "{header:?}");
+        // The header keeps the logo, every tab and every badge.
+        for width in [140, 120, 80, 70, 60] {
+            let row = header_row(app, width, 30);
+            assert!(row.starts_with("│ in "), "{width}: {row:?}");
+            let (numbers, badges) = tabs_and_badges(&row);
+            assert_eq!(numbers, "12345", "{width}: {row:?}");
+            assert_eq!(badges, ["3", "2", "3"], "{width}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn search_labels_are_single_width() {
+        for label in [
+            SEARCH_PROMPT,
+            NO_RESULTS,
+            " Search ",
+            "People",
+            "Jobs",
+            "Posts",
+            " · Invitation",
+            " · Connect",
+            " · Pending",
+            "⌕ ",
+            "▏",
+            "…",
+            "─",
+            "▌",
+        ] {
+            assert_single_width("search", label);
+        }
+        let app = searching("");
+        for (key, what) in hints(&app) {
+            assert_single_width("search hints", key);
+            assert_single_width("search hints", what);
+        }
+        assert!(hints_line(hints(&app)).width() <= 80);
+    }
+
+    /// The text of `spans`, and its bold pieces.
+    fn spans_text(spans: &[Span]) -> (String, Vec<String>) {
+        let text = spans.iter().map(|s| s.content.as_ref()).collect();
+        let bold = spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .map(|s| s.content.to_string())
+            .collect();
+        (text, bold)
+    }
+
+    /// Whether `excerpt` appears in `body` starting on a word boundary.
+    fn starts_a_word(body: &str, excerpt: &str) -> bool {
+        body.match_indices(excerpt)
+            .any(|(at, _)| at == 0 || body[..at].ends_with(' '))
+    }
+
+    fn publish_and_search(body: &str, query: &str) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, body);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, query);
+        app
+    }
+
+    /// The overlay's bold runs and the text of the row holding the selected
+    /// post's body line, at `width`×`height`.
+    fn post_body_row(app: &App, width: u16, height: u16) -> (Vec<String>, String) {
+        let buf = buffer(app, width, height);
+        let popup = search_popup(width, height);
+        let runs = bold_runs(&buf, popup.inner(ratatui::layout::Margin::new(1, 1)));
+        let rows = search_rows(app, width, height);
+        let at = rows
+            .iter()
+            .position(|r| r == "Posts")
+            .unwrap_or_else(|| panic!("no posts in {rows:#?}"));
+        (runs, rows[at + 2].clone())
+    }
+
+    #[test]
+    fn excerpt_starts_on_a_word_unless_the_word_is_too_wide() {
+        let text = "alpha beta gamma";
+        assert_eq!(excerpt_start(text, 11, 6), 6, "\"beta \" fits");
+        assert_eq!(
+            excerpt_start(text, 11, 20),
+            0,
+            "the earliest word that fits"
+        );
+        assert_eq!(excerpt_start(text, 11, 4), 11, "\"ta \" would cut a word");
+        assert_eq!(excerpt_start(text, 11, 0), 11);
+        // A match inside a word wider than the budget cuts it.
+        assert_eq!(excerpt_start("alpha betagamma", 10, 3), 7);
+        assert_eq!(excerpt_start("alpha betagamma", 10, 4), 6);
+        // CJK has no spaces, so it is cut by display width.
+        assert_eq!(excerpt_start("日本語のテキスト", 9, 4), 3);
+        assert_eq!(excerpt_start("日本語のテキスト", 9, 5), 3);
+        // Never a leading space.
+        assert_eq!(excerpt_start("ab  cd", 4, 1), 4);
+    }
+
+    #[test]
+    fn body_line_shows_an_excerpt_around_a_hidden_match() {
+        let style = Style::new();
+        // Visible from the start: exactly the plain line.
+        let body = "I'm happy to share that our team cut the CI queue";
+        assert_eq!(
+            body_line(body, "happy", style, 30),
+            hit_line(&[(body, style, true)], "happy", 30)
+        );
+        assert_eq!(
+            spans_text(&body_line(body, "happy", style, 30)).1,
+            ["happy"]
+        );
+        assert_eq!(
+            body_line(body, "zzz", style, 30),
+            hit_line(&[(body, style, true)], "zzz", 30)
+        );
+
+        // Hidden: `…`, whole words, the match, `…`.
+        let body = "I'm happy to share that our team cut the CI queue from 40 minutes to 6.";
+        let (text, bold) = spans_text(&body_line(body, "cut", style, 24));
+        assert_eq!(bold, ["cut"]);
+        assert!(text.starts_with('…') && text.ends_with('…'), "{text:?}");
+        assert_eq!(width_of(&text), 24, "{text:?}");
+        let excerpt = text.trim_matches('…');
+        assert!(starts_a_word(body, excerpt), "{excerpt:?}");
+        assert!(!excerpt.starts_with("cut"), "context first: {excerpt:?}");
+
+        // `İ` changes length when lowercased; the excerpt keeps it whole.
+        let body = "a b c d e f g h i j k l m n o p İstanbul office opening";
+        let (text, bold) = spans_text(&body_line(body, "stan", style, 20));
+        assert_eq!(bold, ["stan"], "{text:?}");
+        assert!(text.contains("İstanbul"), "{text:?}");
+        assert!(starts_a_word(body, text.trim_matches('…')), "{text:?}");
+        assert!(width_of(&text) <= 20, "{text:?}");
+
+        // Every width, for narrow-screen safety.
+        for width in 0..40 {
+            let (text, _) = spans_text(&body_line(body, "stan", style, width));
+            assert!(width_of(&text) <= width, "{width}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn skipped_shows_an_excerpt_with_the_match_bold() {
+        let app = searching("skipped");
+        assert_eq!(app.search_hits("skipped"), [SearchHit::Post(0)]);
+        let (runs, row) = post_body_row(&app, 120, 30);
+        assert_eq!(runs, ["skipped"], "{row:?}");
+        let excerpt = row
+            .strip_prefix("▌…")
+            .and_then(|r| r.strip_suffix('…'))
+            .unwrap_or_else(|| panic!("an excerpt: {row:?}"));
+        let body = app.posts[0].body.replace('\n', " ");
+        assert!(starts_a_word(&body, excerpt), "{excerpt:?}");
+        assert!(
+            excerpt.find("skipped").is_some_and(|i| i > 0),
+            "{excerpt:?}"
+        );
+        // The plain start of the body is gone.
+        assert!(!row.contains("I'm happy"), "{row:?}");
+    }
+
+    #[test]
+    fn excerpt_for_a_match_at_the_end_of_a_long_body() {
+        let body = format!(
+            "Notes from the offsite. {}and last of all zebracorn.",
+            "We talked about plans and more plans. ".repeat(6)
+        );
+        let app = publish_and_search(&body, "zebracorn");
+        for (width, height) in [(120, 30), (60, 20)] {
+            let (runs, row) = post_body_row(&app, width, height);
+            assert_eq!(runs, ["zebracorn"], "{width}: {row:?}");
+            let excerpt = row.strip_prefix("▌…").expect("an excerpt");
+            assert!(
+                excerpt.ends_with("zebracorn."),
+                "no cut at the end: {row:?}"
+            );
+            assert!(body.ends_with(excerpt), "{excerpt:?}");
+            assert!(starts_a_word(&body, excerpt), "{excerpt:?}");
+            // With the whole end in view, the context fills the rest, short
+            // of at most one word ("more " here) so as not to cut it. The
+            // card has a border and a padding column on each side.
+            let room = usize_of(search_popup(width, height).width) - 4;
+            let shown = width_of(&row);
+            assert!(shown <= room && shown + 6 > room, "{room}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn excerpt_in_a_wide_character_body() {
+        // The rest of the body fits, by display width, and leaves more than
+        // the context's third of the row: no `…` at the end, and the context
+        // fills the line. At 40 columns it would leave less, so the context
+        // keeps its third and the end is cut.
+        let body = format!("{}東京駅で会いましょう。", "会議の議事録です。".repeat(6));
+        let app = publish_and_search(&body, "東京駅");
+        for (width, height) in [(120, 30), (60, 20), (40, 16)] {
+            let (runs, row) = post_body_row(&app, width, height);
+            assert_eq!(runs, ["東京駅"], "{width}: {row:?}");
+            let excerpt = row.strip_prefix("▌…").expect("an excerpt");
+            let room = usize_of(search_popup(width, height).width) - 4;
+            if width > 40 {
+                assert!(body.ends_with(excerpt), "{width}: the end shows: {row:?}");
+            } else {
+                let excerpt = excerpt.strip_suffix('…').expect("cut at the end");
+                assert!(body.contains(excerpt), "{excerpt:?}");
+                assert!(!excerpt.starts_with("東京駅"), "context first: {excerpt:?}");
+            }
+            // Two columns per character, so at most one short.
+            assert!(
+                width_of(&row) <= room && width_of(&row) + 2 > room,
+                "{room}: {row:?}"
+            );
+        }
+
+        // A long rest: cut with `…` at the end, the match still whole.
+        let body = format!(
+            "{}東京駅{}",
+            "会議の議事録です。".repeat(6),
+            "で会いましょう。".repeat(6)
+        );
+        let app = publish_and_search(&body, "東京駅");
+        for (width, height) in [(120, 30), (60, 20), (40, 16)] {
+            let (runs, row) = post_body_row(&app, width, height);
+            assert_eq!(runs, ["東京駅"], "{width}: {row:?}");
+            let excerpt = row
+                .strip_prefix("▌…")
+                .and_then(|r| r.strip_suffix('…'))
+                .unwrap_or_else(|| panic!("{width}: an excerpt cut at both ends: {row:?}"));
+            assert!(body.contains(excerpt), "{excerpt:?}");
+            assert!(!excerpt.starts_with("東京駅"), "context first: {excerpt:?}");
+            let room = usize_of(search_popup(width, height).width) - 4;
+            assert!(width_of(&row) <= room, "{room}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn a_visible_body_match_keeps_the_plain_line() {
+        let app = searching("CI queue");
+        let (runs, row) = post_body_row(&app, 120, 30);
+        assert_eq!(runs, ["CI queue"]);
+        assert!(row.starts_with("▌I'm happy to share"), "{row:?}");
+    }
+
+    #[test]
+    fn search_input_shows_the_result_count() {
+        let first = |query: &str| search_rows(&searching(query), 120, 30)[0].clone();
+        let row = first("bright");
+        assert!(
+            row.starts_with("⌕ bright▏") && row.ends_with(" 5 results"),
+            "{row:?}"
+        );
+        let row = first("lisbon");
+        assert!(
+            row.starts_with("⌕ lisbon▏") && row.ends_with(" 1 result"),
+            "{row:?}"
+        );
+        assert_eq!(first(""), "⌕ ▏", "nothing for an empty query");
+        assert_eq!(first("zqzq"), "⌕ zqzq▏", "nothing extra for no results");
+
+        // A long query keeps the count at full width, and its own end.
+        let query = "Unpopular opinion: the best meeting is the one that turns into a doc";
+        let row = first(query);
+        assert!(
+            row.contains("into a doc▏") && row.ends_with(" 1 result"),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn the_count_goes_before_the_end_of_the_query() {
+        let text = |query: &str, n: usize, width: usize| -> String {
+            search_input(query, n, width)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        // A short query: whole until the count has gone.
+        let mut dropped = false;
+        for width in (3..=40).rev() {
+            let row = text("bright", 5, width);
+            if row.contains("results") {
+                assert!(!dropped, "the count came back at {width}");
+                assert!(row.starts_with("⌕ bright▏"), "{width}: {row:?}");
+                assert_eq!(width_of(&row), width, "{width}: {row:?}");
+            } else {
+                dropped = true;
+                if width >= 9 {
+                    assert_eq!(row, "⌕ bright▏", "{width}: the query stays");
+                }
+            }
+        }
+        assert!(text("bright", 5, 20).ends_with("5 results"));
+        assert_eq!(text("bright", 5, 19), "⌕ bright▏");
+
+        // A long query: the count shows while the end keeps 10 columns.
+        let query = "日本語 search ".repeat(20);
+        for width in 4..=80 {
+            let row = text(&query, 3, width);
+            let shown = row
+                .strip_prefix("⌕ ")
+                .and_then(|r| r.split('▏').next())
+                .expect("icon and cursor");
+            assert!(query.ends_with(shown), "{width}: {row:?}");
+            if row.contains("results") {
+                assert!(width_of(shown) >= QUERY_MIN_WIDTH - 1, "{width}: {row:?}");
+            } else {
+                assert!(
+                    width_of(shown) >= width - 4,
+                    "{width}: the end fills the row"
+                );
+            }
+        }
+        assert!(text(&query, 3, 25).ends_with("3 results"));
+        assert!(!text(&query, 3, 23).contains("results"));
     }
 }
