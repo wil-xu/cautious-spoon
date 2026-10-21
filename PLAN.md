@@ -14,9 +14,10 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   feed, news), and the familiar My Network, Jobs, Messaging and Notifications
   pages.
 - It responds the way LinkedIn does: liking posts, opening a post with its
-  comments, commenting on it and deleting your own comments, writing a post,
-  accepting or ignoring invitations, sending connection requests, saving jobs and applying, reading and replying to
-  messages, and clearing notifications. `/` searches people, jobs and posts
+  comments, commenting on it and deleting your own comments, sending a post
+  to a conversation, writing a post, accepting or ignoring invitations,
+  sending connection requests, saving jobs and applying, reading and replying
+  to messages, and clearing notifications. `/` searches people, jobs and posts
   and jumps to the result.
 - One self-contained binary. No network, no files written at runtime and no
   real data: all content is hard-coded, fictional and safe for work.
@@ -55,7 +56,9 @@ cargo clippy --all-targets -- -D warnings
 ## Layout
 
 Captured from the real binary in a 120×30 tmux pane (re-captured after the
-narrow-header, wide-text and notification changes, and unchanged by them):
+narrow-header, wide-text and notification changes, and unchanged by them;
+re-captured again after the Send picker, which only added `s send` to the
+footer):
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -87,7 +90,7 @@ narrow-header, wide-text and notification changes, and unchanged by them):
                         │ Technical Recruiter at Harborline Talent                       │
                         │ We're hiring! Harborline Logistics is looking for a Site       │
                         ╰────────────────────────────────────────────────────────────────╯
- j/k move  l like  enter open  p post  tab next  1-5 tabs  q quit
+ j/k move  l like  enter open  p post  s send  tab next  1-5 tabs  q quit
 ```
 
 **No emoji, on purpose.** Every glyph is a single-width character:
@@ -98,7 +101,8 @@ of line. Don't add them. A unit test checks every seed string, every hint and
 every rendered cell.
 
 **Typed text is the exception.** You can type `日本語` or an emoji into the
-composer, the reply box, the comment box or the search box, so everything in `ui.rs` that
+composer, the reply box, the comment box, the search box or the Send
+picker's filter, so everything in `ui.rs` that
 wraps, truncates or measures text uses display width (`width_of`, which is
 ratatui's `Span::width`), never the `char` count. `head` and `tail` keep the longest
 start or end of a string that fits in N columns. `hard_wrap` splits typed text
@@ -133,11 +137,19 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     stale.
 - **Footer:** key hints for the current tab and mode. A toast replaces them
   (white on blue) until the next key press. Every hint set fits on one line at
-  80 columns. There are ten sets: Home, post view, comment box, composer, My
-  Network, Jobs, Messaging list, reply box, Notifications and search.
+  80 columns. There are eleven sets: Home, post view, comment box, composer,
+  My Network, Jobs, Messaging list, reply box, Notifications, search and the
+  Send picker.
 - **Selection:** the selected list row has a blue `▌` bar and a highlighted
   background. The selected feed card and the focused box have a light blue
   border. Lists scroll only once the selection would fall off the bottom.
+- **Overlays** (the composer, search and the Send picker) clear their box
+  with `clear_overlay`, which also blanks a double-width character just left
+  of the box. The terminal draws both halves of such a character, and
+  ratatui's buffer diff skips the cell after it, so the box's left border
+  cell was never sent: with a published post of wide text under the left
+  edge, the border went missing in about 300 rows across sizes, first at
+  134×13.
 
 ### Home
 
@@ -150,7 +162,9 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   - the author's headline, truncated with `…`,
   - the body, word-wrapped and cut to 3 rows, the last ending in `…more`,
   - `N reactions · M comments` (singular for 1, thousands with commas),
-  - `Like  Comment  Repost  Send`, where Like becomes a blue `Liked`.
+  - `Like  Comment  Repost  Send`, where Like becomes a blue `Liked`. Like
+    (`l`), Comment (`c` in the post view) and Send (`s`) work. Repost is only
+    a label.
 - **Right, "WorkedIn News"** (`SIDEBAR_WIDTH = 30`): "Top stories", each with
   its age and reader count.
 - **Responsive:** the right sidebar shows only at 100 columns or more, and the
@@ -226,6 +240,64 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   placeholder "What do you want to talk about?". The draft is split into rows
   by display width (`hard_wrap`) rather than word-wrapped, so every typed space
   shows. A long draft keeps its end, where the cursor is, in view.
+- **Send picker (s):** `s` in the feed or the post view opens a "Send" box
+  over the body for the selected post, sized and placed like the search
+  overlay (`search_area`). From the top (`render_send`):
+  - **Filter row** (`send_input`): `To `, the filter and a `▏` cursor, or the
+    dim placeholder `Type a name` and the cursor when the filter is empty. A
+    filter too wide for the row shows its end (`tail`, by display width), so
+    the cursor stays visible. In a row too narrow for the placeholder, the
+    placeholder is cut (`head`).
+  - **Post row:** `author · ` and the first line of the body (`first_line`),
+    cut with `…` to fit (`hit_line` with no query, so nothing is bold).
+  - A rule.
+  - **Recipients:** the conversations whose name matches the filter, in
+    Messaging list order, two lines each: the name, then the headline cut with
+    `…`. Names are regular weight, and the first match of the filter in each
+    name is bold, using search's `hit_line` and `match_ranges`, so bold means
+    "match" here too and an empty filter bolds nothing. The selected one gets the usual `▌` bar and background, and the list
+    scrolls with `render_list` to keep it in view. An empty filter lists every
+    conversation, and a filter matching nothing shows `No matches`.
+
+  Like the other overlays, it clears its box with `clear_overlay` (see
+  "Overlays" above).
+
+  Captured from the real binary in a 120×30 tmux pane, opened from the feed
+  with Maren Holt's post selected, after typing `o` (re-captured after the
+  bold change, which plain text doesn't show; the text is unchanged):
+
+  ```
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ in    ⌕ Search                                 1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ╭ You ─────────────────╮╭────────────────────────────────────────────────────────────────╮╭ WorkedIn News ─────────────╮
+  │ Jordan Vale       ╭ Send ────────────────────────────────────────────────────────────────────────╮ies                │
+  │ Software Engineer │ To o▏                                                                        │ersus-spaces truce │
+  │ Quillfeather Syste│ Maren Holt · I'm happy to share that our team cut the CI queue from 40 minu… │ its third week    │
+  │                   │ ──────────────────────────────────────────────────────────────────────────── │ · 4,812 readers   │
+  │ Connections      3│ ▌Maren Holt                                                                  │s report record    │
+  │ Saved jobs        │ ▌Staff Engineer at Quillfeather Systems                                      │ for standing      │
+  ╰───────────────────│  Ravi Tenorio                                                                │                   │
+                      │  Engineering Manager at Quillfeather Systems                                 │ · 2,960 readers   │
+                      │  Ines Okonkwo                                                                │ stand-ups shorter │
+                      │  Technical Recruiter at Harborline Talent                                    │hairs are removed  │
+                      │                                                                              │ · 1,745 readers   │
+                      │                                                                              │al apps make a     │
+                      │                                                                              │comeback           │
+                      │                                                                              │o · 1,203 readers  │
+                      │                                                                              │ay sprints win     │
+                      │                                                                              │mong small teams   │
+                      │                                                                              │ · 986 readers     │
+                      │                                                                              │───────────────────╯
+                      │                                                                              │
+                      │                                                                              │
+                      │                                                                              │
+                      │                                                                              │
+                      │                                                                              │
+                      ╰──────────────────────────────────────────────────────────────────────────────╯
+                          ╰────────────────────────────────────────────────────────────────╯
+   type filter  ↑/↓ move  enter send  esc cancel
+  ```
 
 ### My Network
 
@@ -266,6 +338,11 @@ A conversation list (34 columns, at most half the width) and the open thread.
 - The thread on the right is the conversation you opened with Enter, not the
   one under the cursor. Moving the cursor doesn't open, and so doesn't mark
   read, anything.
+- **Shared posts:** a post sent from Home is a message from you like any
+  reply: the list preview reads `You: Shared a post by …` with age `now`, and
+  if that conversation is the open thread it shows at the bottom, wrapped in
+  full. Sending doesn't mark the conversation read or unread, reorder the
+  list, move the cursor, open a thread or touch the reply draft.
 
 ### Notifications
 
@@ -407,6 +484,7 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
 | `draft`, `reply`, `comment_draft` | composer, reply box and comment box text |
 | `search: Option<Search>` | `Some { query, selected }` while search is open. `selected` indexes `App::search_hits` |
+| `send: Option<SendPicker>` | `Some { query, selected }` while the Send picker is open. `query` is the filter, `selected` indexes `App::send_recipients` |
 | `status: Option<&'static str>` | toast text. Every toast is a fixed string. Cleared on the next key press |
 | `should_quit` | checked by the event loop in `main.rs` |
 
@@ -423,9 +501,37 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   suggestion name and headline; job title, company and location; post author,
   headline and body. Comments, conversations, notifications and news aren't
   searched. A query that is empty once trimmed matches nothing.
+- **One filter box for search and the picker.** `Search` and `SendPicker`
+  are both `FilterBox { query, selected }`. `FilterBox::on_key(key, len)`
+  does the editing and moving for both: Ctrl- and Alt-modified keys do
+  nothing, a typed key is appended, `Backspace` deletes, and either change
+  that alters the query selects the first item again; `↑`/`↓` move,
+  stopping at 0 and `len - 1`; `Tab`, `BackTab` and every other key do
+  nothing. It hands `Enter` and `Esc` back as a `BoxKey`, and
+  `on_search_key` and `on_send_key` decide what they do (jump or send,
+  close).
 - **Search sits on top of `mode`.** Opening it leaves `tab`, `mode` and every
   selection alone, so Esc (`search = None`) puts back exactly what was there,
   including the post view and its selected comment.
+- **The Send picker sits on top of `mode`** too. `s` opens it from
+  `on_home_key`, so only on Home, in the feed or the post view, and only
+  when there is a selected post. It leaves `tab`, `mode` and every selection
+  alone, so Esc and a successful Enter (`send = None`) put back the feed with
+  the same post or the post view with the same comment. Search and the picker
+  are never open together: `/` is typed into the picker and `s` into search.
+- **Recipients** are never stored. `App::send_recipients(filter)` returns the
+  indexes of the conversations whose `name.to_lowercase()` contains
+  `search_needle(filter)`, in list order. Headlines and messages aren't
+  matched. A filter that is empty once trimmed lists every conversation.
+- **Sending** (`send_post`) closes the picker and pushes a `Message` from you
+  at age 0 onto the end of the recipient's messages, where the recipient is
+  the selected row of the filtered list. The body is `Shared a post by
+  <author>: <first line of the body>` (`first_line`, the text before the
+  first newline; a published post has none, so it's the whole post). Then it
+  toasts "Post sent". It changes nothing else: not `unread` (so the badge
+  stays), the order of the conversations, `chat_sel`, `open_chat`, `reply`,
+  the post's reactions, like state or comments, or `post_sel`. Sending the
+  same post twice sends two messages. Messages still aren't searched.
 - **Switching tabs** (with `1`-`5`, `Tab` or `BackTab`) closes the post view,
   so coming back to Home shows the feed with the same post selected.
   Entering Notifications from another tab copies each `unread` into `is_new`
@@ -463,7 +569,8 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 
 **Global:** Ctrl-C quits from any mode, including the text boxes.
 
-Everywhere except the composer, the reply box, the comment box and search:
+Everywhere except the composer, the reply box, the comment box, search and
+the Send picker:
 
 | Key | Action |
 |---|---|
@@ -483,6 +590,7 @@ Per tab:
 | Home | `p` | open the composer (from the feed, not the post view) |
 | Home | `c` | in the post view, focus the "Add a comment" box with an empty draft. In the feed it does nothing |
 | Home | `x` | in the post view, delete the selected comment if it's yours: "Comment deleted". Otherwise, and in the feed, nothing |
+| Home | `s` | open the Send picker for the selected post, from the feed or the post view |
 | My Network | `a` | accept the selected invitation: removed, connections +1, "Invitation accepted" |
 | My Network | `x` | ignore it: removed, connections unchanged, "Invitation ignored" |
 | My Network | `c` | on a suggestion, Connect ↔ Pending: "Invitation sent" / "Invitation withdrawn" |
@@ -491,7 +599,7 @@ Per tab:
 | Messaging | `Enter` | open the selected conversation, mark it read, focus the reply box |
 
 `a`/`x` on a suggestion and `c` on an invitation do nothing, not even a
-toast. Opening Notifications by any route marks them all read.
+toast. `s` does nothing on My Network, Messaging and Notifications. Opening Notifications by any route marks them all read.
 
 **Composer:** every printable key, including `q`, `j`, `k`, `l`, `1`-`5`,
 `a`, `x`, `c`, `s` and `e`, is typed. `Backspace` deletes. `Enter` publishes
@@ -530,6 +638,18 @@ discards the draft and returns to the post view with the same comment
 selected. `Tab`, `BackTab`, the arrows and every Ctrl- or Alt-modified key do
 nothing (Ctrl-C still quits).
 
+**Send picker:** a text box like search. Every printable key without Ctrl
+or Alt is typed into the filter, including `q`, `j`, `k`, `l`, `c`, `x`, `p`,
+`s`, `/` and `1`-`5`, and does nothing else (no quit, tab switch, move, like,
+comment box, delete, composer or search). `Backspace` deletes, and does
+nothing on an empty filter (the picker stays open). `↓`/`↑` move through the
+recipients, stopping at both ends, and any change to the filter selects the
+first recipient again. `Enter` sends the post to the selected recipient,
+closes the picker and toasts "Post sent", or, with no matches, toasts "No
+matches" and keeps the picker open with the filter as typed. `Esc` closes it
+and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key
+do nothing (Ctrl-C still quits).
+
 **Reply box:** printable keys are typed the same way. `Enter` appends the
 reply to the thread as yours, clears the box and keeps focus. An empty or
 whitespace-only reply does nothing. `Esc` discards the text and returns focus
@@ -544,7 +664,7 @@ workedin/
   Cargo.lock
   src/
     main.rs     ratatui::init()/restore() plus cursor::Show, the panic hook, the event loop
-    app.rs      state, key handling, badges, search. No rendering, no I/O
+    app.rs      state, key handling, badges, search, sending. No rendering, no I/O
     data.rs     seed profile, posts, news, people, jobs, conversations, notifications
     ui.rs       draw(frame, &App): all rendering, pure
 ```
@@ -556,13 +676,14 @@ doesn't show the cursor, so `main.rs` wraps that hook to also send
 in tmux: after `q`, and after a temporarily injected panic, `stty` matched
 its state from before launch, the alternate screen was off and the cursor was
 visible. Both were checked again after the comment box was added, the panic
-injected while the box had focus.
+injected while the box had focus, and again after the Send picker was added,
+the panic injected while the picker was open.
 
 ## Testing
 
-79 unit tests, run with `cargo test` (about 6 s):
+97 unit tests, run with `cargo test` (about 7 s):
 
-- **`app.rs`** (38), on the seed data:
+- **`app.rs`** (48), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -634,19 +755,53 @@ injected while the box had focus.
     comments and on a post with no comments changes nothing and toasts
     nothing. In the comment box, with your own comment selected, `x` is
     typed.
-- **`ui.rs`** (41), rendering into a `TestBackend`:
+  - Send picker, opening: `s` opens it with an empty filter from the feed
+    (second post selected) and from the post view (third comment selected).
+    Esc puts back exactly the same snapshot, sends nothing, and reopening
+    starts empty. `/` then Esc still keeps the comment. `s` on Jobs still
+    saves and unsaves, on My Network, Messaging and Notifications it changes
+    nothing, and it is typed in the composer, the comment box, the reply box
+    and search (so the picker can't open from search).
+  - Send picker typing: with your own comment selected in the post view,
+    `q1jklcxps/` is typed, with no quit, tab switch, comment move, comment
+    box, like, delete, composer or search. Shift is fine. `Tab`, `BackTab`
+    and Ctrl/Alt keys (including Ctrl-Enter, Alt-Enter and Ctrl-Esc) change
+    nothing and send nothing. Backspace on an empty filter keeps it open. In
+    the feed `p` and `l` are typed too. Ctrl-C quits.
+  - Filtering: an empty or blank filter lists all four conversations,
+    `  MAREN ` gives exactly Maren Holt, `o` gives Maren Holt, Ravi Tenorio
+    and Ines Okonkwo in that order, and `Quillfeather`, `recruiter` and
+    `coffee chat` (a headline word, a headline word, a message) give nothing.
+    `↓`/`↑` clamp at both ends, and typing or deleting selects the first
+    recipient again.
+  - Sending Maren Holt's post to Felix Abernathy (filter `felix`) from the
+    post view, with Ines Okonkwo's thread open and half a reply: exactly
+    `Shared a post by Maren Holt: I'm happy to share that our team cut the CI
+    queue from 40 minutes to 6.`, from you at age 0, is appended to Felix's
+    conversation and no other, with "Post sent". The tab, mode (second
+    comment selected), every selection, `open_chat`, the reply draft, the
+    conversations' order and `unread` flags, the badge (2), and every post's
+    reactions, like state and comments are unchanged. A second send adds a
+    second message, and `Shared a post` isn't a search result. Sending from
+    the feed returns to the feed with the same post.
+  - Sending to Maren Holt, who is unread, keeps her unread and the badge at
+    2. `Enter` with `zqzq` toasts "No matches" and keeps the filter. A post
+    you published is sent as `Shared a post by Jordan Vale: …` with the
+    trimmed text.
+- **`ui.rs`** (49), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 18 states:
+  - Every size from 1×1 to 140×40 renders without panicking, for 20 states:
     Home, post view, comment box (empty and with text), post view after
     commenting, composer (empty and with text), My Network (invitation and
     suggestion selected), Jobs (with and without a toast), Messaging, reply
-    box, Notifications, and search (with matches, empty, no match, and over
-    the post view). One thread per state.
+    box, Notifications, search (with matches, empty, no match, and over
+    the post view), and the Send picker (from the feed, and with `o` over the
+    post view). One thread per state.
   - Card counts and `Like` → `Liked`. A published post renders first with
     `now`. The post view shows the full body and comments.
   - Badges in the header follow every count and disappear at 0.
@@ -670,10 +825,10 @@ injected while the box had focus.
     Network tabs.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
-  - Each of the ten hint sets is at most 80 columns, and is what the footer
+  - Each of the eleven hint sets is at most 80 columns, and is what the footer
     shows at 80×24. The post view footer reads exactly
-    `j/k comments  l like  c comment  x delete  esc back  1-5 tabs  q quit`
-    and the
+    `j/k comments  l like  c comment  x delete  s send  esc back  1-5 tabs  q quit`
+    (79 columns with the padding) and the
     comment box's `type write  backspace delete  enter post  esc cancel`.
     Those hints and every comment box label are single width.
   - Comment box states, at 120×30, 80×24 and 60×20: `Press c to comment`
@@ -741,6 +896,43 @@ injected while the box had focus.
     shows its end in the input row and the header box, and the header keeps
     the logo, all five numbers and the badges at 140, 120, 80, 70 and 60
     columns.
+  - Send picker at 120×30: the `Send` title, `To Type a name▏` with the
+    placeholder dim, `Maren Holt · I'm happy to share…` cut with `…` to the
+    row's exact width, the rule, all four recipients' two lines with the
+    first selected (bar and background), then `To o▏` with three recipients
+    and the bar on Ravi Tenorio after `↓`, `No matches` for `zqzq`, and the
+    post row following the selected post. With filter `o`, the only bold
+    cells inside the border are the first match in each name, `o` in Maren
+    Holt and Ravi Tenorio and `O` in Ines Okonkwo (the cell keeps the name's
+    case), each at that name's first match; an empty filter bolds nothing,
+    `FELIX` bolds `Felix`, and `ra` over the post view bolds `Ra`. At 50×20
+    Felix Abernathy's headline
+    is cut with `…`. A filter of wide text four times wider than the row
+    shows its end and fills the row to within one column, at 120×30, 80×24
+    and 60×20.
+  - On Messaging after sending Maren Holt's post to Felix Abernathy: his row
+    shows `now` and `You: Shared a post by`, the badge is still `(2)`, and
+    with his thread open the last message is `Jordan Vale · now` and the
+    whole shared text, wrapped, at 120×30 and 60×20.
+  - Over a published post of wide text (eight times `a日本語…`), search (empty,
+    `日本語` matching that post, and `zqzq`) and the composer (empty, a short
+    draft and a wide draft) at every size from 1×1 to 140×40: every row of
+    the box starts and ends with its border and is exactly the box's width,
+    by display width.
+  - The Send picker at every size from 1×1 to 140×40 from the feed (empty
+    filter, `o`, `zqzq`, a 3,000-character filter mixing `日本語` and ASCII),
+    from the post view (`felix` and the long filter), and over a published
+    post of wide text eight times `a日本語…` long. Plus that post sent to
+    Maren Holt with her thread open on Messaging. Whenever the picker is
+    drawn, every row of it starts and ends with its border and is exactly the
+    box's width, by display width. The header keeps the logo, all five
+    numbers and exactly the non-zero badges at 140, 120, 80, 70 and 60
+    columns in every one of those states. The long filter shows its end, the
+    wide post's row is cut to within one column of the row, and the sent wide
+    post shows in full at the bottom of the thread.
+  - The Home, post view and picker footers read exactly as listed in "Key
+    bindings" at 80×24, are at most 80 columns, and they and every picker
+    label are single width.
 
 These were checked by breaking the code on purpose and restoring it:
 case-sensitive matching fails 8 tests (including the `BRIGHT` one), taking
@@ -782,7 +974,34 @@ the comment box fails `x_is_typed_in_the_comment_box` and
 `the_post_view_stays_inside_its_borders_at_every_size` (its long draft has
 `x`s in it).
 
+For sending, each break was caught and then restored: sending to the
+conversation at the filtered index in the unfiltered list fails 3 tests
+(`sending_maren_holts_post_to_felix`, `a_published_post_is_sent_under_your_name`,
+`a_sent_post_shows_on_messaging`); letting `j` move the selection while the
+picker is open fails `the_send_picker_types_keys_instead_of_acting_on_them`;
+marking the recipient read fails
+`sending_to_an_unread_conversation_keeps_it_unread`; taking the filter's end
+by `char` count instead of display width fails
+`a_long_send_filter_shows_its_end` and
+`the_send_picker_stays_inside_its_border_at_every_size`; and not blanking a
+wide character left of the box fails
+`the_send_picker_stays_inside_its_border_at_every_size` (at 134×13 the wide
+post's text under the box's left edge hid the `╰`, which is how that bug was
+found).
+
+For the other overlays, which had the same bug before the picker existed:
+clearing search with a plain `Clear` again fails
+`search_stays_inside_its_border_over_a_wide_post` (first at 134×13, the
+bottom row missing its `╰`), and doing the same in the composer fails
+`the_composer_stays_inside_its_border_over_a_wide_post` (first at 70×13).
+Drawing every picker name bold, as it was at first, fails
+`only_the_first_match_in_each_name_is_bold`, and so does not searching the
+names (no bold at all). Leaving the selection alone on `Backspace` in
+`FilterBox::on_key` fails both `selection_clamps_and_resets_when_the_query_changes`
+(search) and `send_selection_clamps_and_resets_when_the_filter_changes`
+(the picker), since they share it.
+
 ## Ideas
 
-Repost and send actions, searching comments and messages, scrolling long
+Repost, searching comments and messages, scrolling long
 job descriptions, profile pages, mouse support.

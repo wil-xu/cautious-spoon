@@ -77,14 +77,58 @@ pub(crate) enum Mode {
     Reply,
 }
 
-/// The search overlay, open over whatever tab and mode it was opened from.
-/// Those stay untouched underneath, so closing it puts everything back.
+/// A one-line text box over a list: what search and the Send picker share.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Search {
+pub(crate) struct FilterBox {
     pub query: String,
-    /// Index into `App::search_hits`.
+    /// Index into the list the query gives.
     pub selected: usize,
 }
+
+/// The keys a `FilterBox` leaves to its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoxKey {
+    Enter,
+    Esc,
+}
+
+impl FilterBox {
+    /// Typing, `Backspace` and `↑`/`↓` over a list of `len` items. Any change
+    /// to the query selects the first item again, and the selection stops at
+    /// both ends. Ctrl- and Alt-modified keys, `Tab`, `BackTab` and every other
+    /// key do nothing. `Enter` and `Esc` are returned for the owner to act on.
+    fn on_key(&mut self, key: KeyEvent, len: usize) -> Option<BoxKey> {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
+        }
+        match key.code {
+            KeyCode::Enter => return Some(BoxKey::Enter),
+            KeyCode::Esc => return Some(BoxKey::Esc),
+            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down => self.selected = (self.selected + 1).min(len.saturating_sub(1)),
+            KeyCode::Backspace => {
+                if self.query.pop().is_some() {
+                    self.selected = 0;
+                }
+            }
+            _ => {
+                if let Some(ch) = typed(key) {
+                    self.query.push(ch);
+                    self.selected = 0;
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The search overlay, open over whatever tab and mode it was opened from.
+/// Those stay untouched underneath, so closing it puts everything back.
+/// `selected` indexes `App::search_hits`.
+pub(crate) type Search = FilterBox;
 
 /// One search result, pointing into the list it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +143,17 @@ pub(crate) enum SearchHit {
 /// lowercasing goes on every searched field, so case never matters.
 pub(crate) fn search_needle(query: &str) -> String {
     query.trim().to_lowercase()
+}
+
+/// The Send picker, open over the Home feed or post view it was opened from.
+/// Like search, it leaves `tab`, `mode` and every selection untouched
+/// underneath, so closing it puts everything back. `query` is the filter, and
+/// `selected` indexes `App::send_recipients`.
+pub(crate) type SendPicker = FilterBox;
+
+/// A post's first line: what the Send picker shows and what sending shares.
+pub(crate) fn first_line(body: &str) -> &str {
+    body.lines().next().unwrap_or("")
 }
 
 /// The selected row on My Network, which spans both sections.
@@ -136,6 +191,8 @@ pub(crate) struct App {
     pub comment_draft: String,
     /// `Some` while the search overlay is open. Takes every key but Ctrl-C.
     pub search: Option<Search>,
+    /// `Some` while the Send picker is open. Takes every key but Ctrl-C.
+    pub send: Option<SendPicker>,
     pub status: Option<&'static str>,
     pub should_quit: bool,
 }
@@ -177,6 +234,7 @@ impl App {
             reply: String::new(),
             comment_draft: String::new(),
             search: None,
+            send: None,
             status: None,
             should_quit: false,
         }
@@ -245,6 +303,20 @@ impl App {
         hits
     }
 
+    /// The conversations the Send picker offers for `filter`, as indexes into
+    /// `conversations`, in Messaging list order. Only names are matched, the
+    /// way search matches a field. A filter that is empty once trimmed lists
+    /// every conversation.
+    pub(crate) fn send_recipients(&self, filter: &str) -> Vec<usize> {
+        let needle = search_needle(filter);
+        self.conversations
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     fn network_len(&self) -> usize {
         self.invitations.len() + self.suggestions.len()
     }
@@ -299,6 +371,10 @@ impl App {
             self.on_search_key(key);
             return;
         }
+        if self.send.is_some() {
+            self.on_send_key(key);
+            return;
+        }
         match self.mode {
             Mode::Composer => self.on_composer_key(key),
             Mode::Reply => self.on_reply_key(key),
@@ -330,12 +406,6 @@ impl App {
     /// The search box is a text box, like the composer, except that Ctrl- and
     /// Alt-modified keys do nothing at all.
     fn on_search_key(&mut self, key: KeyEvent) {
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return;
-        }
         let hits = match &self.search {
             Some(search) => self.search_hits(&search.query),
             None => return,
@@ -343,27 +413,13 @@ impl App {
         let Some(search) = self.search.as_mut() else {
             return;
         };
-        match key.code {
-            KeyCode::Esc => self.search = None,
-            KeyCode::Enter => match hits.get(search.selected) {
+        match search.on_key(key, hits.len()) {
+            Some(BoxKey::Esc) => self.search = None,
+            Some(BoxKey::Enter) => match hits.get(search.selected) {
                 Some(&hit) => self.open_hit(hit),
                 None => self.status = Some("No results"),
             },
-            KeyCode::Up => search.selected = search.selected.saturating_sub(1),
-            KeyCode::Down => {
-                search.selected = (search.selected + 1).min(hits.len().saturating_sub(1));
-            }
-            KeyCode::Backspace => {
-                if search.query.pop().is_some() {
-                    search.selected = 0;
-                }
-            }
-            _ => {
-                if let Some(ch) = typed(key) {
-                    search.query.push(ch);
-                    search.selected = 0;
-                }
-            }
+            None => {}
         }
     }
 
@@ -392,6 +448,9 @@ impl App {
 
     fn on_home_key(&mut self, code: KeyCode) {
         match code {
+            KeyCode::Char('s') if self.selected_post().is_some() => {
+                self.send = Some(SendPicker::default());
+            }
             KeyCode::Char('l') => {
                 if let Some(post) = self.posts.get_mut(self.post_sel) {
                     post.liked = !post.liked;
@@ -419,6 +478,51 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The Send picker is a text box, like search: Ctrl- and Alt-modified keys
+    /// do nothing at all.
+    fn on_send_key(&mut self, key: KeyEvent) {
+        let recipients = match &self.send {
+            Some(picker) => self.send_recipients(&picker.query),
+            None => return,
+        };
+        let Some(picker) = self.send.as_mut() else {
+            return;
+        };
+        match picker.on_key(key, recipients.len()) {
+            Some(BoxKey::Esc) => self.send = None,
+            Some(BoxKey::Enter) => match recipients.get(picker.selected) {
+                Some(&chat) => self.send_post(chat),
+                None => self.status = Some("No matches"),
+            },
+            None => {}
+        }
+    }
+
+    /// Closes the picker and appends the selected post to conversation `chat`
+    /// as a message from you. Nothing else changes: not `unread`, the order of
+    /// the conversations, the Messaging selection, the open thread or the
+    /// reply draft.
+    fn send_post(&mut self, chat: usize) {
+        self.send = None;
+        let Some(post) = self.posts.get(self.post_sel) else {
+            return;
+        };
+        let body = format!(
+            "Shared a post by {}: {}",
+            post.author,
+            first_line(&post.body)
+        );
+        let Some(chat) = self.conversations.get_mut(chat) else {
+            return;
+        };
+        chat.messages.push(Message {
+            from_me: true,
+            body,
+            hours_ago: 0,
+        });
+        self.status = Some("Post sent");
     }
 
     /// Removes comment `index` of the open post if it's yours. The selection
@@ -1739,5 +1843,438 @@ mod tests {
         assert_eq!(app.tab, Tab::Network);
         assert_eq!(new(&app), 0, "leaving by a jump clears the markers");
         assert_eq!(app.badge(Tab::Notifications), 0);
+    }
+
+    fn filter(app: &App) -> Option<&str> {
+        app.send.as_ref().map(|p| p.query.as_str())
+    }
+
+    fn selected_recipient(app: &App) -> usize {
+        app.send.as_ref().expect("the picker is open").selected
+    }
+
+    fn recipient_names(app: &App, filter: &str) -> Vec<&'static str> {
+        app.send_recipients(filter)
+            .into_iter()
+            .map(|i| app.conversations[i].name)
+            .collect()
+    }
+
+    /// Every conversation's messages, to compare before and after sending.
+    fn messages(app: &App) -> Vec<Vec<(bool, String, u32)>> {
+        app.conversations
+            .iter()
+            .map(|c| {
+                c.messages
+                    .iter()
+                    .map(|m| (m.from_me, m.body.clone(), m.hours_ago))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Everything sending must leave alone besides the recipient's messages:
+    /// the conversations' order and `unread` flags, the Messaging badge, the
+    /// reply draft, and every post's reactions, like state and comments.
+    type Unsent = (
+        Vec<(&'static str, bool)>,
+        usize,
+        String,
+        Vec<(u32, bool, Vec<String>)>,
+    );
+
+    fn unsent(app: &App) -> Unsent {
+        (
+            app.conversations
+                .iter()
+                .map(|c| (c.name, c.unread))
+                .collect(),
+            app.badge(Tab::Messaging),
+            app.reply.clone(),
+            app.posts
+                .iter()
+                .map(|p| {
+                    let comments = p.comments.iter().map(|c| c.body.clone()).collect();
+                    (p.reactions, p.liked, comments)
+                })
+                .collect(),
+        )
+    }
+
+    const MAREN_SHARED: &str = "Shared a post by Maren Holt: I'm happy to share that our \
+                                team cut the CI queue from 40 minutes to 6.";
+
+    #[test]
+    fn s_opens_the_send_picker_from_the_feed_and_the_post_view() {
+        // The feed, with the second post selected.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        let before = snapshot(&app);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(filter(&app), Some(""));
+        assert_eq!(selected_recipient(&app), 0);
+        assert_eq!(snapshot(&app), before, "the feed stays underneath");
+        assert!(app.status.is_none());
+        type_str(&mut app, "ravi");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.send.is_none());
+        assert_eq!(snapshot(&app), before);
+        assert_eq!((app.mode, app.post_sel), (Mode::Browse, 1));
+        // Reopening starts from an empty filter.
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(filter(&app), Some(""));
+
+        // The post view, with the third comment selected.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        let before = snapshot(&app);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(filter(&app), Some(""));
+        type_str(&mut app, "felix");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.send.is_none());
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        assert_eq!(messages(&app), messages(&App::new()), "Esc sends nothing");
+
+        // Search still opens from the post view, and Esc keeps the comment.
+        press(&mut app, KeyCode::Char('/'));
+        assert_eq!(query(&app), Some(""));
+        assert!(app.send.is_none());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+    }
+
+    #[test]
+    fn s_does_nothing_elsewhere_and_is_typed_in_text_boxes() {
+        // Jobs: still save and unsave.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        let saved = app.jobs[0].saved;
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.jobs[0].saved, !saved);
+        assert!(app.send.is_none());
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.jobs[0].saved, saved);
+        assert!(app.send.is_none());
+
+        // My Network, Messaging and Notifications: nothing at all.
+        for tab in ['2', '4', '5'] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(tab));
+            let before = snapshot(&app);
+            let kept = unsent(&app);
+            press(&mut app, KeyCode::Char('s'));
+            assert!(app.send.is_none(), "tab {tab}");
+            assert!(app.status.is_none(), "tab {tab}");
+            assert_eq!(snapshot(&app), before, "tab {tab}");
+            assert_eq!(unsent(&app), kept, "tab {tab}");
+            assert_eq!(app.invitations.len(), 3);
+            assert!(app.suggestions.iter().all(|s| !s.pending));
+        }
+
+        // Typed in the composer, the comment box, the reply box and search.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "s");
+        assert_eq!((app.draft.as_str(), app.mode), ("s", Mode::Composer));
+        assert!(app.send.is_none());
+
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "s");
+        assert_eq!(app.comment_draft, "s");
+        assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
+        assert!(app.send.is_none());
+
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "s");
+        assert_eq!((app.reply.as_str(), app.mode), ("s", Mode::Reply));
+        assert!(app.send.is_none());
+
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "s");
+        assert_eq!(query(&app), Some("s"));
+        assert!(app.send.is_none(), "the picker can't open from search");
+    }
+
+    #[test]
+    fn the_send_picker_types_keys_instead_of_acting_on_them() {
+        // Your own comment is selected, so `x` could delete it.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "mine");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+        let before = snapshot(&app);
+        let kept = unsent(&app);
+        let sent = messages(&app);
+        press(&mut app, KeyCode::Char('s'));
+
+        type_str(&mut app, "q1jklcxps/");
+        assert_eq!(filter(&app), Some("q1jklcxps/"));
+        assert!(!app.should_quit, "q is typed, not quit");
+        assert_eq!(snapshot(&app), before, "1, j and k are typed");
+        assert_eq!(
+            app.mode,
+            Mode::PostDetail { comment: 3 },
+            "c is typed, not the comment box"
+        );
+        assert_eq!(unsent(&app), kept, "l is typed, not a like; x not a delete");
+        assert_eq!(app.posts[0].comments.len(), 4);
+        assert!(app.draft.is_empty(), "p is typed, not the composer");
+        assert!(app.search.is_none(), "/ is typed, not search");
+        assert!(app.status.is_none());
+
+        // Shift is fine.
+        app.on_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT));
+        assert_eq!(filter(&app), Some("q1jklcxps/Q"));
+
+        // Tab, BackTab and Ctrl- or Alt-modified keys do nothing.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::BackTab);
+        for (code, modifiers) in [
+            (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            (KeyCode::Char('l'), KeyModifiers::ALT),
+            (KeyCode::Char('1'), KeyModifiers::ALT),
+            (KeyCode::Backspace, KeyModifiers::CONTROL),
+            (KeyCode::Backspace, KeyModifiers::ALT),
+            (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Esc, KeyModifiers::CONTROL),
+            (KeyCode::Down, KeyModifiers::ALT),
+        ] {
+            app.on_key(KeyEvent::new(code, modifiers));
+        }
+        assert_eq!(filter(&app), Some("q1jklcxps/Q"));
+        assert_eq!(snapshot(&app), before);
+        assert_eq!(unsent(&app), kept);
+        assert_eq!(messages(&app), sent, "nothing was sent");
+        assert!(app.status.is_none());
+
+        // Backspace deletes, and on an empty filter keeps the picker open.
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(filter(&app), Some("q1jklcxps/"));
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        assert_eq!(filter(&app), Some(""), "still open");
+        assert_eq!(snapshot(&app), before);
+
+        // In the feed too, p and l are typed.
+        let mut app = App::new();
+        let kept = unsent(&app);
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "pl");
+        assert_eq!(filter(&app), Some("pl"));
+        assert_eq!(app.mode, Mode::Browse, "not the composer");
+        assert_eq!(unsent(&app), kept, "not a like");
+
+        // Ctrl-C still quits.
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn the_send_filter_matches_names_only() {
+        let mut app = App::new();
+        let all = [
+            "Maren Holt",
+            "Ravi Tenorio",
+            "Ines Okonkwo",
+            "Felix Abernathy",
+        ];
+        assert_eq!(recipient_names(&app, ""), all);
+        assert_eq!(recipient_names(&app, "   "), all, "blank lists everyone");
+        assert_eq!(recipient_names(&app, "  MAREN "), ["Maren Holt"]);
+        assert_eq!(
+            recipient_names(&app, "o"),
+            ["Maren Holt", "Ravi Tenorio", "Ines Okonkwo"]
+        );
+        // Headlines and messages don't match.
+        assert!(recipient_names(&app, "Quillfeather").is_empty());
+        assert!(recipient_names(&app, "recruiter").is_empty());
+        assert!(recipient_names(&app, "coffee chat").is_empty());
+
+        // Through the keys, too.
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "  MAREN ");
+        let typed = filter(&app).expect("open").to_owned();
+        assert_eq!(recipient_names(&app, &typed), ["Maren Holt"]);
+    }
+
+    #[test]
+    fn send_selection_clamps_and_resets_when_the_filter_changes() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Up);
+        assert_eq!(selected_recipient(&app), 0, "clamps at the top");
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(selected_recipient(&app), 3, "clamps at the bottom");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(selected_recipient(&app), 2);
+
+        type_str(&mut app, "o");
+        assert_eq!(selected_recipient(&app), 0, "typing resets the selection");
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(selected_recipient(&app), 2, "three matches");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(selected_recipient(&app), 0, "so does deleting");
+        assert_eq!(filter(&app), Some(""));
+
+        // Moving with no matches stays at 0.
+        type_str(&mut app, "zqzq");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(selected_recipient(&app), 0);
+    }
+
+    #[test]
+    fn sending_maren_holts_post_to_felix() {
+        // Ines Okonkwo's thread open on Messaging, and half a reply.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('1'));
+        app.reply = "half a reply".to_owned();
+        assert_eq!((app.chat_sel, app.open_chat), (2, Some(2)));
+        assert_eq!(app.badge(Tab::Messaging), 2);
+
+        // Maren Holt's post view, with the second comment selected.
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+        let before = snapshot(&app);
+        let kept = unsent(&app);
+        let sent = messages(&app);
+
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "felix");
+        assert_eq!(recipient_names(&app, "felix"), ["Felix Abernathy"]);
+        press(&mut app, KeyCode::Enter);
+
+        assert!(app.send.is_none(), "Enter closes the picker");
+        assert_eq!(app.status, Some("Post sent"));
+        assert_eq!(snapshot(&app), before, "back where you were");
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+        assert_eq!(unsent(&app), kept);
+        assert_eq!(app.badge(Tab::Messaging), 2);
+        assert_eq!(app.reply, "half a reply");
+        let after = messages(&app);
+        assert_eq!(app.conversations[3].name, "Felix Abernathy");
+        for (i, (was, now)) in sent.iter().zip(&after).enumerate() {
+            if i == 3 {
+                let mut want = was.clone();
+                want.push((true, MAREN_SHARED.to_owned(), 0));
+                assert_eq!(now, &want, "appended to Felix's conversation");
+            } else {
+                assert_eq!(now, was, "conversation {i}");
+            }
+        }
+
+        // Sending it again sends a second message.
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "felix");
+        press(&mut app, KeyCode::Enter);
+        let felix = &messages(&app)[3];
+        assert_eq!(felix.len(), sent[3].len() + 2);
+        assert_eq!(felix[felix.len() - 2], felix[felix.len() - 1]);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+
+        // Messages still aren't searched.
+        assert!(app.search_hits("Shared a post").is_empty());
+    }
+
+    #[test]
+    fn sending_from_the_feed_returns_to_the_feed() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        let before = snapshot(&app);
+        let post = &app.posts[2];
+        let want = format!(
+            "Shared a post by {}: {}",
+            post.author,
+            first_line(&post.body)
+        );
+        assert!(want.starts_with("Shared a post by Ines Okonkwo: We're hiring!"));
+
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Post sent"));
+        assert_eq!(snapshot(&app), before);
+        assert_eq!((app.mode, app.post_sel), (Mode::Browse, 2));
+        let ravi = &app.conversations[1];
+        assert_eq!(ravi.name, "Ravi Tenorio");
+        let last = ravi.messages.last().expect("just sent");
+        assert_eq!(
+            (last.from_me, last.body.as_str(), last.hours_ago),
+            (true, want.as_str(), 0)
+        );
+    }
+
+    #[test]
+    fn sending_to_an_unread_conversation_keeps_it_unread() {
+        let mut app = App::new();
+        assert!(app.conversations[0].unread);
+        assert_eq!(app.badge(Tab::Messaging), 2);
+        press(&mut app, KeyCode::Char('s'));
+        // An empty filter lists everyone, Maren Holt first.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Post sent"));
+        let maren = &app.conversations[0];
+        assert_eq!(maren.name, "Maren Holt");
+        assert_eq!(maren.messages.last().expect("sent").body, MAREN_SHARED);
+        assert!(maren.unread, "still unread");
+        assert!(app.conversations[1].unread);
+        assert_eq!(app.badge(Tab::Messaging), 2);
+    }
+
+    #[test]
+    fn enter_without_matches_toasts_and_keeps_the_picker() {
+        let mut app = App::new();
+        let sent = messages(&app);
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "zqzq");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("No matches"));
+        assert_eq!(filter(&app), Some("zqzq"), "open, with the filter");
+        assert_eq!(messages(&app), sent);
+        assert_eq!(app.mode, Mode::Browse);
+
+        type_str(&mut app, "x");
+        assert!(app.status.is_none(), "the toast clears on the next key");
+        assert_eq!(filter(&app), Some("zqzqx"));
+    }
+
+    #[test]
+    fn a_published_post_is_sent_under_your_name() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "  Shipping the Send action today  ");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.post_sel, 0);
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "ines");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Post sent"));
+        let ines = &app.conversations[2];
+        assert_eq!(
+            ines.messages.last().expect("sent").body,
+            "Shared a post by Jordan Vale: Shipping the Send action today"
+        );
     }
 }

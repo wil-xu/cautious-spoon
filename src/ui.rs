@@ -21,7 +21,9 @@ use crate::app::Mode;
 use crate::app::NetworkItem;
 use crate::app::Search;
 use crate::app::SearchHit;
+use crate::app::SendPicker;
 use crate::app::Tab;
+use crate::app::first_line;
 use crate::app::search_needle;
 use crate::data::Post;
 
@@ -284,6 +286,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     if let Some(search) = &app.search {
         render_search(frame, app, search, body);
     }
+    if let Some(picker) = &app.send {
+        render_send(frame, app, picker, body);
+    }
 }
 
 /// How much of each tab label fits in the header. The header tries them in
@@ -443,6 +448,14 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("esc", "close"),
         ];
     }
+    if app.send.is_some() {
+        return &[
+            ("type", "filter"),
+            ("↑/↓", "move"),
+            ("enter", "send"),
+            ("esc", "cancel"),
+        ];
+    }
     match (app.tab, app.mode) {
         (_, Mode::Composer) => &[
             ("type", "write"),
@@ -467,6 +480,7 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("l", "like"),
             ("c", "comment"),
             ("x", "delete"),
+            ("s", "send"),
             ("esc", "back"),
             ("1-5", "tabs"),
             ("q", "quit"),
@@ -476,6 +490,7 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("l", "like"),
             ("enter", "open"),
             ("p", "post"),
+            ("s", "send"),
             ("tab", "next"),
             ("1-5", "tabs"),
             ("q", "quit"),
@@ -831,6 +846,23 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+/// Clears `area` for an overlay. A double-width character just left of it
+/// would spill into its first column and hide the left border, since the
+/// terminal draws both halves of it, so that character is blanked too.
+fn clear_overlay(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    let Some(x) = area.left().checked_sub(1) else {
+        return;
+    };
+    let buf = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        let cell = &mut buf[(x, y)];
+        if width_of(cell.symbol()) > 1 {
+            cell.set_symbol(" ");
+        }
+    }
+}
+
 /// Where the composer box goes over the body.
 fn composer_area(body: Rect) -> Rect {
     centered(body, body.width.saturating_sub(4).min(64), 12)
@@ -838,7 +870,7 @@ fn composer_area(body: Rect) -> Rect {
 
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let popup = composer_area(area);
-    frame.render_widget(Clear, popup);
+    clear_overlay(frame, popup);
     let block = card(" Create a post ", true);
     let inner = block.inner(popup);
     let width = usize_of(inner.width);
@@ -1142,7 +1174,7 @@ fn hit_lines(app: &App, hit: SearchHit, needle: &str, width: usize) -> Vec<Line<
 
 fn render_search(frame: &mut Frame, app: &App, search: &Search, body: Rect) {
     let popup = search_area(body);
-    frame.render_widget(Clear, popup);
+    clear_overlay(frame, popup);
     let block = card(" Search ", true);
     let inner = block.inner(popup);
     let width = usize_of(inner.width);
@@ -1196,6 +1228,96 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search, body: Rect) {
         items.push(hit_lines(app, hit, &needle, width));
     }
     render_list(frame, results, items, selected);
+}
+
+// ---------------------------------------------------------------- Send
+
+const SEND_PLACEHOLDER: &str = "Type a name";
+const NO_MATCHES: &str = "No matches";
+
+/// The Send picker's first row: `To `, the end of the filter and the cursor,
+/// or a dim placeholder and the cursor when the filter is empty.
+fn send_input(filter: &str, width: usize) -> Line<'static> {
+    // `To ` and the cursor.
+    let room = width.saturating_sub(4);
+    let text = if filter.is_empty() {
+        Span::styled(
+            head(SEND_PLACEHOLDER, room).to_owned(),
+            Style::new().fg(DIM),
+        )
+    } else {
+        Span::styled(tail(filter, room).to_owned(), Style::new().fg(Color::White))
+    };
+    Line::from(vec![
+        Span::styled("To ", Style::new().fg(LIGHT_BLUE)),
+        text,
+        Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
+    ])
+}
+
+/// The Send picker, sized and placed like the search overlay: the filter, the
+/// post being sent, a rule, then the matching conversations.
+fn render_send(frame: &mut Frame, app: &App, picker: &SendPicker, body: Rect) {
+    let popup = search_area(body);
+    clear_overlay(frame, popup);
+    let block = card(" Send ", true);
+    let inner = block.inner(popup);
+    let width = usize_of(inner.width);
+    frame.render_widget(block, popup);
+    let [input, post_row, rule, list] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    frame.render_widget(send_input(&picker.query, width), input);
+    if let Some(post) = app.selected_post() {
+        // No needle, so nothing is bold: `hit_line` only cuts with `…`.
+        let line = hit_line(
+            &[
+                (post.author, Style::new().fg(Color::White), false),
+                (" · ", Style::new().fg(DIM), false),
+                (first_line(&post.body), Style::new().fg(Color::Gray), false),
+            ],
+            "",
+            width,
+        );
+        frame.render_widget(Line::from(line), post_row);
+    }
+    frame.render_widget(
+        Line::styled("─".repeat(width), Style::new().fg(BORDER)),
+        rule,
+    );
+
+    let recipients = app.send_recipients(&picker.query);
+    if recipients.is_empty() {
+        frame.render_widget(
+            Line::styled(truncate(NO_MATCHES, width), Style::new().fg(DIM)),
+            list,
+        );
+        return;
+    }
+    // One column goes to the selection bar. As in search, only the first
+    // match in each name is bold, so bold always means "match".
+    let width = width.saturating_sub(1);
+    let needle = search_needle(&picker.query);
+    let items = recipients
+        .iter()
+        .map(|&i| {
+            let chat = &app.conversations[i];
+            vec![
+                Line::from(hit_line(
+                    &[(chat.name, Style::new().fg(Color::White), true)],
+                    &needle,
+                    width,
+                )),
+                Line::styled(truncate(chat.headline, width), Style::new().fg(DIM)),
+            ]
+        })
+        .collect();
+    render_list(frame, list, items, Some(picker.selected));
 }
 
 // ---------------------------------------------------------- My Network
@@ -1676,6 +1798,19 @@ mod tests {
                     "hana",
                 ),
             ),
+            ("send", at(&[KeyCode::Char('s')], "")),
+            (
+                "send over post",
+                at(
+                    &[
+                        KeyCode::Char('j'),
+                        KeyCode::Enter,
+                        KeyCode::Char('j'),
+                        KeyCode::Char('s'),
+                    ],
+                    "o",
+                ),
+            ),
         ]
     }
 
@@ -2005,7 +2140,7 @@ mod tests {
         let mut app = post_view(0);
         assert_eq!(
             footer(&app),
-            "j/k comments  l like  c comment  x delete  esc back  1-5 tabs  q quit"
+            "j/k comments  l like  c comment  x delete  s send  esc back  1-5 tabs  q quit"
         );
         assert!(hints_line(hints(&app)).width() <= 80);
         press(&mut app, KeyCode::Char('c'));
@@ -2345,7 +2480,7 @@ mod tests {
                 seen.push(set.as_ptr());
             }
         }
-        assert_eq!(seen.len(), 10, "every hint set was checked");
+        assert_eq!(seen.len(), 11, "every hint set was checked");
     }
 
     fn header_row(app: &App, width: u16, height: u16) -> String {
@@ -3232,5 +3367,490 @@ mod tests {
         }
         assert!(text(&query, 3, 25).ends_with("3 results"));
         assert!(!text(&query, 3, 23).contains("results"));
+    }
+
+    /// The Send picker open on post `down` of the feed, with `filter` typed.
+    fn sending(down: usize, filter: &str) -> App {
+        let mut app = App::new();
+        for _ in 0..down {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, filter);
+        app
+    }
+
+    /// The text columns inside the Send picker's border and padding. The
+    /// picker sits where the search overlay does, so `search_popup` and
+    /// `search_rows` find it too.
+    fn send_text_width(width: u16, height: u16) -> usize {
+        usize_of(search_popup(width, height).width) - 4
+    }
+
+    const MAREN_SHARED: &str = "Shared a post by Maren Holt: I'm happy to share that our \
+                                team cut the CI queue from 40 minutes to 6.";
+
+    #[test]
+    fn the_send_picker_shows_the_filter_post_and_recipients() {
+        let app = sending(0, "");
+        let rows = search_rows(&app, 120, 30);
+        let popup = search_popup(120, 30);
+        let buf = buffer(&app, 120, 30);
+        let top = text_between(&buf, popup.top(), popup.left(), popup.right());
+        assert!(top.starts_with("╭ Send ─"), "{top:?}");
+        // The dim placeholder, then the cursor.
+        assert_eq!(rows[0], "To Type a name▏", "{rows:#?}");
+        let placeholder = popup.left() + 2 + 3;
+        assert_eq!(buf[(placeholder, popup.top() + 1)].symbol(), "T");
+        assert_eq!(buf[(placeholder, popup.top() + 1)].fg, DIM);
+        // The post: author, then its first line, cut with `…` to fit.
+        let post = &rows[1];
+        assert!(
+            post.starts_with("Maren Holt · I'm happy to share that our team cut the CI queue"),
+            "{post:?}"
+        );
+        assert!(
+            post.ends_with('…') && !post.contains("No heroics"),
+            "{post:?}"
+        );
+        assert_eq!(width_of(post), send_text_width(120, 30), "{post:?}");
+        assert!(rows[2].chars().all(|c| c == '─'), "the rule: {rows:#?}");
+        // Every conversation, two lines each, the first one selected.
+        assert_eq!(
+            rows[3..11],
+            [
+                "▌Maren Holt",
+                "▌Staff Engineer at Quillfeather Systems",
+                "Ravi Tenorio",
+                "Engineering Manager at Quillfeather Systems",
+                "Ines Okonkwo",
+                "Technical Recruiter at Harborline Talent",
+                "Felix Abernathy",
+                "Software Engineering Intern at Quillfeather Systems",
+            ],
+            "{rows:#?}"
+        );
+        assert_eq!(buf[(popup.left() + 4, popup.top() + 4)].bg, HIGHLIGHT_BG);
+        assert!(rows[11..].iter().all(String::is_empty), "{rows:#?}");
+
+        // A filter, with the cursor after it, and the selection moved.
+        let mut app = sending(0, "o");
+        press(&mut app, KeyCode::Down);
+        let rows = search_rows(&app, 120, 30);
+        assert_eq!(rows[0], "To o▏", "{rows:#?}");
+        assert_eq!(
+            rows[3..9],
+            [
+                "Maren Holt",
+                "Staff Engineer at Quillfeather Systems",
+                "▌Ravi Tenorio",
+                "▌Engineering Manager at Quillfeather Systems",
+                "Ines Okonkwo",
+                "Technical Recruiter at Harborline Talent",
+            ],
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("Felix")), "{rows:#?}");
+
+        // Nothing matches.
+        let rows = search_rows(&sending(0, "zqzq"), 120, 30);
+        assert_eq!(rows[0], "To zqzq▏");
+        assert!(rows[1].starts_with("Maren Holt · "), "{rows:#?}");
+        assert_eq!(rows[3], NO_MATCHES, "{rows:#?}");
+
+        // The post row follows the selected post.
+        let rows = search_rows(&sending(1, ""), 120, 30);
+        assert!(
+            rows[1].starts_with("Tobias Ferreira-Lund · Unpopular opinion"),
+            "{rows:#?}"
+        );
+
+        // In a narrow picker the headline is cut with `…`.
+        let rows = search_rows(&sending(0, "felix"), 50, 20);
+        assert_eq!(rows[3], "▌Felix Abernathy", "{rows:#?}");
+        let headline = rows[4]
+            .strip_prefix('▌')
+            .and_then(|r| r.strip_suffix('…'))
+            .expect("bar and ellipsis");
+        assert!(
+            "Software Engineering Intern at Quillfeather Systems".starts_with(headline),
+            "{headline:?}"
+        );
+        assert_eq!(width_of(&rows[4]), send_text_width(50, 20));
+    }
+
+    #[test]
+    fn a_long_send_filter_shows_its_end() {
+        let filter = WIDE.repeat(4);
+        let app = sending(0, &filter);
+        for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+            let buf = buffer(&app, width, height);
+            assert_bordered(
+                &buf,
+                search_popup(width, height),
+                &format!("{width}x{height}"),
+            );
+            let rows = search_rows(&app, width, height);
+            let shown = rows[0]
+                .strip_prefix("To ")
+                .and_then(|r| r.strip_suffix('▏'))
+                .expect("label and cursor");
+            assert!(filter.ends_with(shown), "{width}x{height}: {shown:?}");
+            // `To ` and the cursor take four columns.
+            let room = send_text_width(width, height) - 4;
+            assert!(
+                width_of(shown) <= room && width_of(shown) + 1 >= room,
+                "{width}x{height}: {shown:?} should fill {room} columns, less at most one"
+            );
+        }
+    }
+
+    /// The rows of the open thread's last message on Messaging: its author
+    /// line, then the body rows, without their indent.
+    fn last_message(app: &App, width: u16, height: u16) -> (String, Vec<String>) {
+        let body = screen_areas(Rect::new(0, 0, width, height))[1];
+        let [_, thread] = Layout::horizontal([
+            Constraint::Length(MESSAGING_LIST_WIDTH.min(body.width / 2)),
+            Constraint::Min(0),
+        ])
+        .areas(body);
+        let inner = card(" Thread ", false).inner(thread);
+        let [_, _, messages, _] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .areas(inner);
+        let buf = buffer(app, width, height);
+        let rows: Vec<String> = (messages.top()..messages.bottom())
+            .map(|y| text_between(&buf, y, messages.left(), messages.right()))
+            .map(|r| r.trim_end().to_owned())
+            .collect();
+        let author = rows
+            .iter()
+            .rposition(|r| !r.is_empty() && !r.starts_with("  "))
+            .expect("a message shows");
+        let lines = rows[author + 1..]
+            .iter()
+            .take_while(|r| !r.is_empty())
+            .map(|r| r.strip_prefix("  ").expect("indented body").to_owned())
+            .collect();
+        (rows[author].clone(), lines)
+    }
+
+    #[test]
+    fn a_sent_post_shows_on_messaging() {
+        let mut app = post_view(0);
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "felix");
+        press(&mut app, KeyCode::Enter);
+        let s = screen(&app, 120, 30);
+        assert!(s.contains(" Post sent "), "{s}");
+        assert!(!s.contains(" Send ─"), "the picker closed: {s}");
+        assert!(s.contains("╭ Post ─"), "back in the post view: {s}");
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('4'));
+        let s = screen(&app, 120, 30);
+        let list: Vec<String> = s
+            .lines()
+            .map(|l| l.chars().take(usize_of(MESSAGING_LIST_WIDTH)).collect())
+            .collect();
+        let felix = list
+            .iter()
+            .position(|l| l.contains("Felix Abernathy"))
+            .expect("Felix's row");
+        assert!(
+            list[felix].trim_end().ends_with("now │"),
+            "{:?}",
+            list[felix]
+        );
+        assert!(
+            list[felix + 1].contains("  You: Shared a post by"),
+            "{:?}",
+            list[felix + 1]
+        );
+        assert!(s.contains("4 Messaging (2)"), "the badge stays: {s}");
+
+        // Felix's thread shows it last, wrapped in full.
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Enter);
+        for (width, height) in [(120, 30), (60, 20)] {
+            let (author, lines) = last_message(&app, width, height);
+            assert_eq!(author, "Jordan Vale · now", "{width}x{height}");
+            assert!(lines.len() > 1, "{width}x{height}: wraps: {lines:#?}");
+            assert_eq!(lines.join(" "), MAREN_SHARED, "{width}x{height}");
+        }
+    }
+
+    /// A long post of double-width text, published, so it's first in the feed.
+    fn published_wide() -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, &WIDE.repeat(8));
+        press(&mut app, KeyCode::Enter);
+        app
+    }
+
+    /// A long published post of double-width text, with the picker open on it.
+    fn sending_a_wide_post() -> App {
+        let mut app = published_wide();
+        press(&mut app, KeyCode::Char('s'));
+        app
+    }
+
+    /// Draws each state at every size from 1×1 to 140×40, one thread per
+    /// state, and checks that every row of the overlay at `popup(width,
+    /// height)` starts and ends with its border and is exactly its width.
+    fn assert_overlay_bordered_at_every_size(states: &[(&str, App)], popup: fn(u16, u16) -> Rect) {
+        std::thread::scope(|scope| {
+            for (name, app) in states {
+                scope.spawn(move || {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            let area = popup(width, height);
+                            if area.width < 2 || area.height < 2 {
+                                continue;
+                            }
+                            let buf = terminal.backend().buffer();
+                            assert_bordered(buf, area, &format!("{name} at {width}x{height}"));
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn search_stays_inside_its_border_over_a_wide_post() {
+        let searching_wide = |query: &str| {
+            let mut app = published_wide();
+            press(&mut app, KeyCode::Char('/'));
+            type_str(&mut app, query);
+            app
+        };
+        let states = [
+            ("empty", searching_wide("")),
+            ("matching the post", searching_wide("日本語")),
+            ("no match", searching_wide("zqzq")),
+        ];
+        assert_eq!(states[1].1.search_hits("日本語"), [SearchHit::Post(0)]);
+        assert_overlay_bordered_at_every_size(&states, search_popup);
+    }
+
+    /// Where the composer is on a `width`×`height` screen.
+    fn composer_popup(width: u16, height: u16) -> Rect {
+        composer_area(screen_areas(Rect::new(0, 0, width, height))[1])
+    }
+
+    #[test]
+    fn the_composer_stays_inside_its_border_over_a_wide_post() {
+        let composing_wide = |draft: &str| {
+            let mut app = published_wide();
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, draft);
+            app
+        };
+        let states = [
+            ("empty", composing_wide("")),
+            ("short draft", composing_wide("Another one")),
+            ("wide draft", composing_wide(WIDE)),
+        ];
+        assert_eq!(states[0].1.mode, Mode::Composer);
+        assert_overlay_bordered_at_every_size(&states, composer_popup);
+    }
+
+    #[test]
+    fn only_the_first_match_in_each_name_is_bold() {
+        let inside = search_popup(120, 30).inner(ratatui::layout::Margin::new(1, 1));
+        let app = sending(0, "o");
+        let buf = buffer(&app, 120, 30);
+        // `Okonkwo` matches with its capital: the cell shows the name as it is.
+        assert_eq!(bold_runs(&buf, inside), ["o", "o", "O"]);
+        // Each one is the first match in its name. The rows inside the border
+        // are the filter, the post, the rule, then two per recipient. A name
+        // starts after the padding and the selection bar.
+        for (row, name) in [(3, "Maren Holt"), (5, "Ravi Tenorio"), (7, "Ines Okonkwo")] {
+            let y = inside.y + row;
+            let bold: Vec<u16> = (inside.left()..inside.right())
+                .filter(|&x| buf[(x, y)].modifier.contains(Modifier::BOLD))
+                .collect();
+            let at = name.to_lowercase().find('o').expect("o in the name");
+            assert_eq!(bold, [inside.x + 2 + u16_of(at)], "{name}");
+        }
+
+        // An empty filter bolds nothing, not even the names.
+        let buf = buffer(&sending(0, ""), 120, 30);
+        assert!(bold_runs(&buf, inside).is_empty());
+        // A whole-name match, and the same over the post view.
+        let buf = buffer(&sending(0, "FELIX"), 120, 30);
+        assert_eq!(bold_runs(&buf, inside), ["Felix"]);
+        let mut app = post_view(0);
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "ra");
+        let buf = buffer(&app, 120, 30);
+        assert_eq!(bold_runs(&buf, inside), ["Ra"]);
+    }
+
+    #[test]
+    fn the_send_picker_stays_inside_its_border_at_every_size() {
+        let long: String = "日本語 send".repeat(375);
+        assert_eq!(long.chars().count(), 3_000);
+        let post_view_sending = |filter: &str| {
+            let mut app = post_view(0);
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Char('s'));
+            type_str(&mut app, filter);
+            app
+        };
+        // The wide post sent to Maren Holt, her thread open on Messaging.
+        let mut wide_sent = sending_a_wide_post();
+        press(&mut wide_sent, KeyCode::Enter);
+        press(&mut wide_sent, KeyCode::Char('4'));
+        press(&mut wide_sent, KeyCode::Enter);
+        let states = [
+            ("feed empty", sending(0, "")),
+            ("feed matching", sending(0, "o")),
+            ("feed no match", sending(0, "zqzq")),
+            ("feed long", sending(0, &long)),
+            ("post view matching", post_view_sending("felix")),
+            ("post view long", post_view_sending(&long)),
+            ("wide post", sending_a_wide_post()),
+            ("wide post sent", wide_sent),
+        ];
+        std::thread::scope(|scope| {
+            for (name, app) in &states {
+                scope.spawn(move || {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            let popup = search_popup(width, height);
+                            if app.send.is_none() || popup.width < 2 || popup.height < 2 {
+                                continue;
+                            }
+                            let buf = terminal.backend().buffer();
+                            assert_bordered(buf, popup, &format!("{name} at {width}x{height}"));
+                        }
+                    }
+                });
+            }
+        });
+
+        for (name, app) in &states {
+            // The header keeps the logo, every tab and every badge.
+            let want: Vec<String> = Tab::ALL
+                .iter()
+                .map(|&t| app.badge(t))
+                .filter(|&b| b > 0)
+                .map(|b| b.to_string())
+                .collect();
+            for width in [140, 120, 80, 70, 60] {
+                let row = header_row(app, width, 30);
+                assert!(row.starts_with("│ in "), "{name} at {width}: {row:?}");
+                let (numbers, badges) = tabs_and_badges(&row);
+                assert_eq!(numbers, "12345", "{name} at {width}: {row:?}");
+                assert_eq!(badges, want, "{name} at {width}: {row:?}");
+            }
+        }
+
+        // The long filter shows its end, from the feed and the post view.
+        for app in [&states[3].1, &states[5].1] {
+            let rows = search_rows(app, 120, 30);
+            let shown = rows[0]
+                .strip_prefix("To ")
+                .and_then(|r| r.strip_suffix('▏'))
+                .expect("label and cursor");
+            assert!(width_of(shown) > 60 && long.ends_with(shown), "{shown:?}");
+        }
+        // The post view is still underneath, with its comment selected.
+        assert_eq!(states[5].1.mode, Mode::PostDetail { comment: 1 });
+
+        // The wide post's first line is cut to fit the row.
+        let width = send_text_width(120, 30);
+        let post = &search_rows(&states[6].1, 120, 30)[1];
+        assert!(post.starts_with("Jordan Vale · a日本語"), "{post:?}");
+        assert!(post.ends_with('…'), "{post:?}");
+        assert!(
+            width_of(post) <= width && width_of(post) + 1 >= width,
+            "{post:?}"
+        );
+
+        // Sent, the wide post shows in full at the bottom of the thread.
+        let app = &states[7].1;
+        let message = &app.conversations[0].messages.last().expect("sent").body;
+        assert_eq!(
+            message,
+            &format!("Shared a post by Jordan Vale: {}", WIDE.repeat(8))
+        );
+        let (author, lines) = last_message(app, 120, 30);
+        assert_eq!(author, "Jordan Vale · now");
+        // Wrapping splits the wide text anywhere, so compare without spaces.
+        assert_eq!(
+            lines.concat().replace(' ', ""),
+            message.replace(' ', ""),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn send_hints_and_labels() {
+        let footer = |app: &App| {
+            screen(app, 80, 24)
+                .lines()
+                .last()
+                .expect("screen has rows")
+                .trim()
+                .to_owned()
+        };
+        let feed = App::new();
+        let detail = post_view(0);
+        let picker = sending(0, "");
+        for (app, want) in [
+            (
+                &feed,
+                "j/k move  l like  enter open  p post  s send  tab next  1-5 tabs  q quit",
+            ),
+            (
+                &detail,
+                "j/k comments  l like  c comment  x delete  s send  esc back  1-5 tabs  q quit",
+            ),
+            (&picker, "type filter  ↑/↓ move  enter send  esc cancel"),
+        ] {
+            assert_eq!(footer(app), want);
+            assert!(hints_line(hints(app)).width() <= 80, "{want}");
+            for (key, what) in hints(app) {
+                assert_single_width("send hints", key);
+                assert_single_width("send hints", what);
+            }
+        }
+        for label in [
+            " Send ",
+            "To ",
+            SEND_PLACEHOLDER,
+            NO_MATCHES,
+            "Post sent",
+            "Shared a post by ",
+            " · ",
+            "▏",
+            "▌",
+            "…",
+            "─",
+        ] {
+            assert_single_width("send", label);
+        }
     }
 }
