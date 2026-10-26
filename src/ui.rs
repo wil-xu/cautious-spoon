@@ -901,7 +901,7 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 
 // -------------------------------------------------------------- Search
 
-const SEARCH_PROMPT: &str = "Type to search people, jobs and posts";
+const SEARCH_PROMPT: &str = "Type to search people, jobs, posts, comments and messages";
 const NO_RESULTS: &str = "No results";
 
 /// Where the search overlay goes over the body.
@@ -1100,7 +1100,35 @@ fn search_group(hit: SearchHit) -> &'static str {
         SearchHit::Invitation(_) | SearchHit::Suggestion(_) => "People",
         SearchHit::Job(_) => "Jobs",
         SearchHit::Post(_) => "Posts",
+        SearchHit::Comment { .. } => "Comments",
+        SearchHit::Conversation { .. } => "Messages",
     }
+}
+
+/// `prefix`, never bold, then `body` on one line by the `body_line` rule in
+/// the columns left after it. When the prefix alone fills the row, the two
+/// are cut together with `…` instead.
+fn prefixed_body_line(
+    prefix: &str,
+    body: &str,
+    needle: &str,
+    styles: (Style, Style),
+    width: usize,
+) -> Vec<Span<'static>> {
+    let used = width_of(prefix);
+    if used >= width {
+        return hit_line(
+            &[(prefix, styles.0, false), (body, styles.1, true)],
+            needle,
+            width,
+        );
+    }
+    let mut spans = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix.to_owned(), styles.0));
+    }
+    spans.extend(body_line(body, needle, styles.1, width - used));
+    spans
 }
 
 /// A result's two lines. Only bold text is a match, so nothing else is bold.
@@ -1167,6 +1195,38 @@ fn hit_lines(app: &App, hit: SearchHit, needle: &str, width: usize) -> Vec<Line<
                     width,
                 )),
                 Line::from(body_line(&body, needle, gray, width)),
+            ]
+        }
+        SearchHit::Comment { post, comment } => {
+            let post = &app.posts[post];
+            let comment = &post.comments[comment];
+            let body = comment.body.replace('\n', " ");
+            vec![
+                Line::from(hit_line(
+                    &[
+                        (comment.author, white, false),
+                        (" · on ", dim, false),
+                        (post.author, white, false),
+                        ("'s post", dim, false),
+                    ],
+                    needle,
+                    width,
+                )),
+                Line::from(body_line(&body, needle, gray, width)),
+            ]
+        }
+        SearchHit::Conversation { chat, message } => {
+            let chat = &app.conversations[chat];
+            // `App::search_hits` chose the message; this only draws it.
+            let shown = message.and_then(|m| chat.messages.get(m));
+            let second = shown.map_or_else(Vec::new, |m| {
+                let who = if m.from_me { "You: " } else { "" };
+                let body = m.body.replace('\n', " ");
+                prefixed_body_line(who, &body, needle, (dim, gray), width)
+            });
+            vec![
+                Line::from(hit_line(&[(chat.name, white, true)], needle, width)),
+                Line::from(second),
             ]
         }
     }
@@ -3851,6 +3911,436 @@ mod tests {
             "─",
         ] {
             assert_single_width("send", label);
+        }
+    }
+
+    /// The result rows under `heading`, up to the blank row or the end, with
+    /// the selection bar taken off.
+    fn group(rows: &[String], heading: &str) -> Vec<String> {
+        let at = rows
+            .iter()
+            .position(|r| r == heading)
+            .unwrap_or_else(|| panic!("no {heading:?} in {rows:#?}"));
+        rows[at + 1..]
+            .iter()
+            .take_while(|r| !r.is_empty())
+            .map(|r| r.trim_start_matches('▌').to_owned())
+            .collect()
+    }
+
+    /// The headings in the overlay, top to bottom.
+    fn headings(rows: &[String]) -> Vec<&str> {
+        rows.iter()
+            .map(String::as_str)
+            .filter(|r| ["People", "Jobs", "Posts", "Comments", "Messages"].contains(r))
+            .collect()
+    }
+
+    /// The bold runs inside the search overlay at `width`×`height`.
+    fn search_bold(app: &App, width: u16, height: u16) -> Vec<String> {
+        let buf = buffer(app, width, height);
+        let inside = search_popup(width, height).inner(ratatui::layout::Margin::new(1, 1));
+        bold_runs(&buf, inside)
+    }
+
+    /// The bold runs on the overlay row whose text contains `text`.
+    fn bold_on_row(app: &App, width: u16, height: u16, text: &str) -> Vec<String> {
+        let buf = buffer(app, width, height);
+        let inside = search_popup(width, height).inner(ratatui::layout::Margin::new(1, 1));
+        let y = (inside.top()..inside.bottom())
+            .find(|&y| text_between(&buf, y, inside.left(), inside.right()).contains(text))
+            .unwrap_or_else(|| panic!("no row with {text:?}"));
+        bold_runs(
+            &buf,
+            Rect {
+                y,
+                height: 1,
+                ..inside
+            },
+        )
+    }
+
+    /// Opens conversation `down` on Messaging and sends `text` as a reply.
+    fn reply_to(app: &mut App, down: usize, text: &str) {
+        press(app, KeyCode::Char('4'));
+        for _ in 0..down {
+            press(app, KeyCode::Char('j'));
+        }
+        press(app, KeyCode::Enter);
+        type_str(app, text);
+        press(app, KeyCode::Enter);
+        press(app, KeyCode::Esc);
+    }
+
+    #[test]
+    fn comments_and_messages_show_under_their_own_headings() {
+        let rows = search_rows(&searching("typo"), 120, 30);
+        assert!(rows[0].ends_with(" 3 results"), "{rows:#?}");
+        assert_eq!(headings(&rows), ["Posts", "Comments", "Messages"]);
+        assert_eq!(
+            group(&rows, "Comments"),
+            [
+                "Maren Holt · on Felix Abernathy's post",
+                "Welcome aboard. The typo had it coming.",
+            ]
+        );
+        assert_eq!(
+            group(&rows, "Messages"),
+            ["Felix Abernathy", "On to the next typo."]
+        );
+
+        let rows = search_rows(&searching("caching"), 120, 30);
+        assert_eq!(headings(&rows), ["Comments", "Messages"]);
+        assert_eq!(
+            group(&rows, "Comments"),
+            [
+                "Hana Sorensen · on Maren Holt's post",
+                "Would love a write-up of the caching setup.",
+            ]
+        );
+        assert_eq!(
+            group(&rows, "Messages"),
+            [
+                "Maren Holt",
+                "Ha. Want to pair on the caching write-up this week?"
+            ]
+        );
+
+        // Every group at once, in order.
+        let mut app = post_view(0);
+        comment_on(&mut app, "Brightkettle should copy this");
+        reply_to(&mut app, 3, "Did Brightkettle call you back?");
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "bright");
+        let groups: Vec<&str> = app
+            .search_hits("bright")
+            .into_iter()
+            .map(search_group)
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                "People", "People", "Jobs", "Posts", "Posts", "Comments", "Messages"
+            ]
+        );
+        // They don't all fit in the box: the end scrolls into view.
+        let rows = search_rows(&app, 120, 40);
+        assert_eq!(headings(&rows), ["People", "Jobs", "Posts", "Comments"]);
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Down);
+        }
+        let rows = search_rows(&app, 120, 40);
+        assert_eq!(headings(&rows).last(), Some(&"Messages"));
+        assert_eq!(
+            group(&rows, "Comments"),
+            [
+                "Jordan Vale · on Maren Holt's post",
+                "Brightkettle should copy this"
+            ]
+        );
+        assert_eq!(
+            group(&rows, "Messages"),
+            ["Felix Abernathy", "You: Did Brightkettle call you back?"]
+        );
+
+        // The new empty prompt.
+        let rows = search_rows(&searching(""), 120, 30);
+        assert_eq!(
+            rows[2],
+            "Type to search people, jobs, posts, comments and messages"
+        );
+        assert_eq!(SEARCH_PROMPT, rows[2]);
+    }
+
+    #[test]
+    fn a_conversation_shows_its_newest_matching_message() {
+        // Ines Okonkwo: both messages match, and your 28h reply is newer.
+        let rows = search_rows(&searching("thanks"), 120, 30);
+        assert_eq!(headings(&rows), ["Posts", "Messages"]);
+        assert_eq!(
+            group(&rows, "Messages"),
+            [
+                "Ines Okonkwo",
+                "You: Thanks Ines, I'll keep it in mind.",
+                "Felix Abernathy",
+                // His only match, not his newest message.
+                "Thanks for reviewing my first PR!",
+            ]
+        );
+
+        // Found by name only: the newest message, with no bold on it.
+        let app = searching("felix");
+        let rows = search_rows(&app, 120, 30);
+        assert_eq!(headings(&rows), ["Posts", "Messages"]);
+        assert_eq!(
+            group(&rows, "Messages"),
+            ["Felix Abernathy", "On to the next typo."]
+        );
+        assert!(bold_on_row(&app, 120, 30, "On to the next typo.").is_empty());
+        assert_eq!(search_bold(&app, 120, 30), ["Felix", "Felix"]);
+
+        // A newer matching reply takes over the row.
+        let mut app = App::new();
+        reply_to(&mut app, 3, "Thanks again for the review");
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "thanks");
+        let rows = search_rows(&app, 120, 30);
+        assert_eq!(
+            group(&rows, "Messages")[2..],
+            ["Felix Abernathy", "You: Thanks again for the review"]
+        );
+    }
+
+    #[test]
+    fn bold_marks_only_the_match_in_comment_and_message_rows() {
+        let app = searching("typo");
+        assert_eq!(search_bold(&app, 120, 30), ["typo"; 3]);
+        assert!(bold_on_row(&app, 120, 30, "Maren Holt · on").is_empty());
+        assert!(bold_on_row(&app, 120, 30, "Felix Abernathy ").len() <= 1);
+
+        // `You: ` is never bold, even when it would match.
+        let mut app = App::new();
+        reply_to(&mut app, 3, "See you there");
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "you");
+        assert_eq!(bold_on_row(&app, 120, 30, "You: See you there"), ["you"]);
+        let rows = search_rows(&app, 120, 30);
+        assert!(
+            group(&rows, "Messages").contains(&"You: See you there".to_owned()),
+            "{rows:#?}"
+        );
+        let app = searching("thanks");
+        assert_eq!(
+            bold_on_row(&app, 120, 30, "You: Thanks Ines"),
+            ["Thanks"],
+            "the prefix isn't bold"
+        );
+        assert_eq!(search_bold(&app, 120, 30), ["thanks", "Thanks", "Thanks"]);
+
+        // The commenter, the label and the post author are never bold.
+        let mut app = post_view(0);
+        comment_on(&mut app, "Holt's team rocks");
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "holt");
+        let rows = search_rows(&app, 120, 30);
+        assert_eq!(
+            group(&rows, "Comments"),
+            ["Jordan Vale · on Maren Holt's post", "Holt's team rocks"]
+        );
+        assert!(bold_on_row(&app, 120, 30, "Jordan Vale · on Maren Holt's post").is_empty());
+        assert_eq!(bold_on_row(&app, 120, 30, "Holt's team rocks"), ["Holt"]);
+        // The post's author line, the comment body and the conversation name.
+        assert_eq!(search_bold(&app, 120, 30), ["Holt"; 3]);
+    }
+
+    #[test]
+    fn excerpts_for_matches_deep_in_a_long_comment_and_message() {
+        let text = format!(
+            "Notes from the offsite. {}and last of all zebracorn.",
+            "We talked about plans and more plans. ".repeat(6)
+        );
+        let mut app = post_view(0);
+        comment_on(&mut app, &text);
+        reply_to(&mut app, 3, &text);
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "zebracorn");
+        for (width, height) in [(120, 30), (60, 20)] {
+            let rows = search_rows(&app, width, height);
+            assert_eq!(headings(&rows), ["Comments", "Messages"], "{width}");
+            let comment = &group(&rows, "Comments")[1];
+            let message = &group(&rows, "Messages")[1];
+            let excerpt = comment.strip_prefix('…').expect("an excerpt");
+            assert!(excerpt.ends_with("zebracorn."), "{width}: {comment:?}");
+            assert!(text.ends_with(excerpt), "{width}: {excerpt:?}");
+            assert!(starts_a_word(&text, excerpt), "{width}: {excerpt:?}");
+            let excerpt = message.strip_prefix("You: …").expect("prefix, excerpt");
+            assert!(excerpt.ends_with("zebracorn."), "{width}: {message:?}");
+            assert!(text.ends_with(excerpt), "{width}: {excerpt:?}");
+            assert!(starts_a_word(&text, excerpt), "{width}: {excerpt:?}");
+            assert_eq!(search_bold(&app, width, height), ["zebracorn"; 2]);
+            // Both fill the row, short of at most one word.
+            let room = usize_of(search_popup(width, height).width) - 5;
+            for row in [comment, message] {
+                assert!(
+                    width_of(row) <= room && width_of(row) + 6 > room,
+                    "{room}: {row:?}"
+                );
+            }
+        }
+
+        // `İ` lowercases longer: the excerpt and the bold stay exact.
+        let text = format!(
+            "{}İstanbul office opening",
+            "We talked about plans and more plans. ".repeat(3)
+        );
+        let mut app = post_view(0);
+        comment_on(&mut app, &text);
+        reply_to(&mut app, 3, &text);
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "stan");
+        for (width, height) in [(120, 30), (60, 20), (40, 20)] {
+            let rows = search_rows(&app, width, height);
+            assert_eq!(headings(&rows), ["Comments", "Messages"], "{width}");
+            let comment = &group(&rows, "Comments")[1];
+            let message = &group(&rows, "Messages")[1];
+            assert!(comment.starts_with('…'), "{width}: {comment:?}");
+            assert!(message.starts_with("You: …"), "{width}: {message:?}");
+            for row in [comment, message] {
+                assert!(row.contains("İstanbul"), "{width}: {row:?}");
+            }
+            assert_eq!(search_bold(&app, width, height), ["stan"; 2], "{width}");
+        }
+    }
+
+    #[test]
+    fn a_read_conversation_shows_the_same_row_as_an_unread_one() {
+        let cells = |app: &App| {
+            let buf = buffer(app, 120, 30);
+            let popup = search_popup(120, 30);
+            (popup.top()..popup.bottom())
+                .flat_map(|y| (popup.left()..popup.right()).map(move |x| (x, y)))
+                .map(|xy| buf[xy].clone())
+                .collect::<Vec<_>>()
+        };
+        let mut unread = App::new();
+        press(&mut unread, KeyCode::Char('4'));
+        press(&mut unread, KeyCode::Char('/'));
+        type_str(&mut unread, "ravi");
+        assert!(unread.conversations[1].unread);
+
+        let mut read = App::new();
+        press(&mut read, KeyCode::Char('4'));
+        press(&mut read, KeyCode::Char('j'));
+        press(&mut read, KeyCode::Enter);
+        press(&mut read, KeyCode::Esc);
+        press(&mut read, KeyCode::Char('k'));
+        press(&mut read, KeyCode::Char('/'));
+        type_str(&mut read, "ravi");
+        assert!(!read.conversations[1].unread);
+        assert_eq!(cells(&read), cells(&unread));
+        let rows = search_rows(&read, 120, 30);
+        assert_eq!(
+            group(&rows, "Messages"),
+            ["Ravi Tenorio", "No agenda, just catching up."]
+        );
+    }
+
+    #[test]
+    fn enter_on_a_comment_far_down_shows_it_selected_at_80x24() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "roadmap");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        let s = screen(&app, 80, 24);
+        let row = s
+            .lines()
+            .find(|l| l.contains("Next quarter's roadmap."))
+            .unwrap_or_else(|| panic!("the comment shows:\n{s}"));
+        assert!(row.contains("┃ Next quarter's roadmap."), "selected:\n{s}");
+        assert!(s.contains("┃ Wendell Achterberg · 4d"), "{s}");
+
+        // It only shows because the view scrolled to it.
+        app.mode = Mode::PostDetail { comment: 0 };
+        let s = screen(&app, 80, 24);
+        assert!(!s.contains("Next quarter's roadmap."), "{s}");
+    }
+
+    #[test]
+    fn long_comments_and_replies_stay_inside_the_search_border_at_every_size() {
+        let long = format!("{}bright終了", "日本語 search ".repeat(272));
+        assert_eq!(long.chars().count(), 3_000);
+        let mut base = post_view(0);
+        comment_on(&mut base, &long);
+        reply_to(&mut base, 3, &long);
+        assert_eq!(base.posts[0].comments[3].body, long);
+        assert_eq!(
+            base.conversations[3].messages.last().expect("sent").body,
+            long
+        );
+        let open = |app: &App, keys: &[KeyCode], query: &str, down: usize| {
+            let mut app = App {
+                posts: app.posts.clone(),
+                conversations: app.conversations.clone(),
+                ..App::new()
+            };
+            for &k in keys {
+                press(&mut app, k);
+            }
+            press(&mut app, KeyCode::Char('/'));
+            type_str(&mut app, query);
+            for _ in 0..down {
+                press(&mut app, KeyCode::Down);
+            }
+            app
+        };
+        // Felix Abernathy's thread, with the long reply, open on Messaging.
+        let thread = [
+            KeyCode::Char('4'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+            KeyCode::Esc,
+        ];
+        let states = [
+            ("every group", open(&base, &[], "bright", 0)),
+            ("every group, last", open(&base, &[], "bright", 10)),
+            ("cjk only", open(&base, &[], "終了", 0)),
+            ("cjk only, last", open(&base, &[], "終了", 1)),
+            ("cjk word", open(&base, &[], "日本語", 1)),
+            (
+                "over the post view",
+                open(&base, &[KeyCode::Enter], "bright", 6),
+            ),
+            ("over the thread", open(&base, &thread, "search", 1)),
+        ];
+        assert_eq!(states[6].1.open_chat, Some(3));
+        let kinds = |app: &App, query: &str| {
+            let mut groups: Vec<&str> = app
+                .search_hits(query)
+                .into_iter()
+                .map(search_group)
+                .collect();
+            groups.dedup();
+            groups
+        };
+        assert_eq!(
+            kinds(&states[0].1, "bright"),
+            ["People", "Jobs", "Posts", "Comments", "Messages"]
+        );
+        assert_eq!(kinds(&states[2].1, "終了"), ["Comments", "Messages"]);
+        assert_overlay_bordered_at_every_size(&states, search_popup);
+
+        // The match near the end shows, bold, in both.
+        let app = &states[2].1;
+        assert_eq!(search_bold(app, 120, 30), ["終了"; 2]);
+        let rows = search_rows(app, 120, 30);
+        let comment = &group(&rows, "Comments")[1];
+        let message = &group(&rows, "Messages")[1];
+        let excerpt = comment.strip_prefix('…').expect("an excerpt");
+        assert!(
+            long.ends_with(excerpt) && width_of(excerpt) > 60,
+            "{comment:?}"
+        );
+        let excerpt = message.strip_prefix("You: …").expect("prefix, excerpt");
+        assert!(
+            long.ends_with(excerpt) && width_of(excerpt) > 60,
+            "{message:?}"
+        );
+    }
+
+    #[test]
+    fn comment_and_message_labels_are_single_width() {
+        for label in [
+            SEARCH_PROMPT,
+            "Comments",
+            "Messages",
+            " · on ",
+            "'s post",
+            "You: ",
+        ] {
+            assert_single_width("search", label);
         }
     }
 }

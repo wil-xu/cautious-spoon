@@ -17,8 +17,8 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   comments, commenting on it and deleting your own comments, sending a post
   to a conversation, writing a post, accepting or ignoring invitations,
   sending connection requests, saving jobs and applying, reading and replying
-  to messages, and clearing notifications. `/` searches people, jobs and posts
-  and jumps to the result.
+  to messages, and clearing notifications. `/` searches people, jobs, posts,
+  comments and messages and jumps to the result.
 - One self-contained binary. No network, no files written at runtime and no
   real data: all content is hard-coded, fictional and safe for work.
 
@@ -359,31 +359,31 @@ does).
 `/` opens a "Search" box centered over the body (at most 80×24, and 4
 columns and 2 rows smaller than the body), over whatever tab and mode were
 showing. Captured from the real binary in a 120×30 tmux pane after typing
-`bright`:
+`typo`:
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ in    ⌕ bright▏                                1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+│ in    ⌕ typo▏                                  1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ You ─────────────────╮╭────────────────────────────────────────────────────────────────╮╭ WorkedIn News ─────────────╮
 │ Jordan Vale       ╭ Search ──────────────────────────────────────────────────────────────────────╮ies                │
-│ Software Engineer │ ⌕ bright▏                                                          5 results │ersus-spaces truce │
+│ Software Engineer │ ⌕ typo▏                                                            3 results │ersus-spaces truce │
 │ Quillfeather Syste│ ──────────────────────────────────────────────────────────────────────────── │ its third week    │
-│                   │  People                                                                      │ · 4,812 readers   │
-│ Connections      3│ ▌Baptiste Moreau                                                             │s report record    │
-│ Saved jobs        │ ▌Frontend Engineer at Brightkettle · Invitation                              │ for standing      │
-╰───────────────────│  Mateo Achebe                                                                │                   │
-                    │  Developer Advocate at Brightkettle · Connect                                │ · 2,960 readers   │
-                    │                                                                              │ stand-ups shorter │
-                    │  Jobs                                                                        │hairs are removed  │
-                    │  Developer Advocate                                                          │ · 1,745 readers   │
-                    │  Brightkettle · Anywhere in Europe · Remote                                  │al apps make a     │
-                    │                                                                              │comeback           │
-                    │  Posts                                                                       │o · 1,203 readers  │
-                    │  Tobias Ferreira-Lund · Product Manager at Brightkettle                      │ay sprints win     │
-                    │  Unpopular opinion: the best meeting is the one that turns into a doc. Writ… │mong small teams   │
-                    │  Hana Sorensen · Data Scientist at Brightkettle                              │ · 986 readers     │
-                    │  Our churn model hit 99% accuracy on the first try. Exciting, until we noti… │───────────────────╯
+│                   │  Posts                                                                       │ · 4,812 readers   │
+│ Connections      3│ ▌Felix Abernathy · Software Engineering Intern at Quillfeather Systems       │s report record    │
+│ Saved jobs        │ ▌Today I merged my first pull request! It fixes a typo in an error message … │ for standing      │
+╰───────────────────│                                                                              │                   │
+                    │  Comments                                                                    │ · 2,960 readers   │
+                    │  Maren Holt · on Felix Abernathy's post                                      │ stand-ups shorter │
+                    │  Welcome aboard. The typo had it coming.                                     │hairs are removed  │
+                    │                                                                              │ · 1,745 readers   │
+                    │  Messages                                                                    │al apps make a     │
+                    │  Felix Abernathy                                                             │comeback           │
+                    │  On to the next typo.                                                        │o · 1,203 readers  │
+                    │                                                                              │ay sprints win     │
+                    │                                                                              │mong small teams   │
+                    │                                                                              │ · 986 readers     │
+                    │                                                                              │───────────────────╯
                     │                                                                              │
                     │                                                                              │
                     │                                                                              │
@@ -401,10 +401,10 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
   shows while the query keeps at least `QUERY_MIN_WIDTH` (10) columns, or all
   of a shorter one, so `⌕ bright▏  5 results` needs 20 columns and at 19 it
   is just `⌕ bright▏`. Under the input row, a rule.
-- **Results:** the empty prompt `Type to search people, jobs and posts`, or
-  `No results`, or the results grouped under `People`, `Jobs` and `Posts`
-  headings, in that order. A group with no results has no heading. Each
-  result is two lines:
+- **Results:** the empty prompt `Type to search people, jobs, posts,
+  comments and messages`, or `No results`, or the results grouped under
+  `People`, `Jobs`, `Posts`, `Comments` and `Messages` headings, in that
+  order. A group with no results has no heading. Each result is two lines:
   - person: the name, then `headline · Invitation` (or `· Connect` /
     `· Pending` for a suggestion). The label always shows; the headline is cut
     with `…` to make room,
@@ -421,9 +421,28 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
     the start, except when the nearest word start doesn't fit (a long word,
     or CJK text, which has no spaces): then it keeps as much of the end as
     fits, by display width. A match already visible from the start keeps the
-    plain line.
+    plain line,
+  - comment: `commenter · on <post author>'s post`, then the comment body on
+    one line by the same `body_line` rule as a post body (plain, or an
+    excerpt around a hidden first match),
+  - conversation: the name, then the message the hit carries
+    (`SearchHit::Conversation { chat, message }`, chosen by
+    `App::search_hits`; `hit_lines` only draws it). Your own message gets a
+    dim `You: ` prefix, as on the Messaging list, and the body follows it by
+    the `body_line` rule in the columns left (`prefixed_body_line`); when the
+    prefix alone fills the row, prefix and body are cut together with `…`.
+    With `thanks`, Ines Okonkwo shows
+    `You: Thanks Ines, I'll keep it in mind.` (her own older message matches
+    too) and Felix Abernathy shows his only match,
+    `Thanks for reviewing my first PR!`, not his newest message. The row
+    doesn't depend on `unread`: a read and an unread conversation look the
+    same.
 - **Highlight:** on each line, the first match of the query in a searched
-  field (not in a separator or label) that fits before the `…` is bold.
+  field (not in a separator or label) that fits before the `…` is bold. For
+  the new kinds the searched fields drawn are a comment body, a conversation
+  name and a message body. A comment's first line (commenter, `· on`, post
+  author, `'s post`) and the `You: ` prefix are never bold, and a
+  conversation found only by its name has no bold on its second line.
   Nothing else in the results is bold, so bold always means "match".
   `match_ranges` finds matches in `text.to_lowercase()` and maps them back to
   whole characters of the original, because lowercasing can change length
@@ -495,12 +514,25 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   (`App::saved_jobs`) are computed when asked, never stored.
 - **Search results** are never stored either. `App::search_hits(query)`
   recomputes them from the current state each time, as `SearchHit` values
-  (`Invitation(i)`, `Suggestion(i)`, `Job(i)`, `Post(i)`) indexing the live
-  lists. The query is trimmed and lowercased (`search_needle`), and a field
-  matches when its `to_lowercase()` contains that. Fields: invitation and
-  suggestion name and headline; job title, company and location; post author,
-  headline and body. Comments, conversations, notifications and news aren't
-  searched. A query that is empty once trimmed matches nothing.
+  (`Invitation(i)`, `Suggestion(i)`, `Job(i)`, `Post(i)`,
+  `Comment { post, comment }`, `Conversation { chat, message }`) indexing
+  the live lists.
+  The query is trimmed and lowercased (`search_needle`), and a field matches
+  when its `to_lowercase()` contains that. Fields: invitation and suggestion
+  name and headline; job title, company and location; post author, headline
+  and body; comment body (not its author or headline); conversation name and
+  every message body (not its headline). Notifications and news aren't
+  searched. The order is people (invitations, then suggestions), jobs, posts
+  in feed order, comments (by post in feed order, then in post view order),
+  then conversations in Messaging list order. A post and one of its comments
+  are separate results: neither makes the other match. A conversation is one
+  result however many of its messages match, and its `message` is the index
+  of the message its row shows: the newest whose body matches, or the newest
+  when only the name matches (`None` only for a conversation with no
+  messages, which the seed and the app never make). "Newest" is last in the
+  thread, where replies and shared posts are appended. The rule lives here,
+  next to the matching, so a row can't show a message that isn't the match.
+  A query that is empty once trimmed matches nothing.
 - **One filter box for search and the picker.** `Search` and `SendPicker`
   are both `FilterBox { query, selected }`. `FilterBox::on_key(key, len)`
   does the editing and moving for both: Ctrl- and Alt-modified keys do
@@ -531,7 +563,8 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   toasts "Post sent". It changes nothing else: not `unread` (so the badge
   stays), the order of the conversations, `chat_sel`, `open_chat`, `reply`,
   the post's reactions, like state or comments, or `post_sel`. Sending the
-  same post twice sends two messages. Messages still aren't searched.
+  same post twice sends two messages. Messages are searched, so
+  `shared a post` then finds the recipient's conversation.
 - **Switching tabs** (with `1`-`5`, `Tab` or `BackTab`) closes the post view,
   so coming back to Home shows the feed with the same post selected.
   Entering Notifications from another tab copies each `unread` into `is_new`
@@ -552,8 +585,8 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   whitespace trimmed (what's inside is kept as typed). Then it selects the new
   comment (`PostDetail { comment: len - 1 }`), clears the draft and toasts
   "Comment posted". It changes nothing else: not the reactions or like state,
-  `post_sel`, or another tab. Comments aren't searched, so a commented word
-  doesn't make the post a result.
+  `post_sel`, or another tab. Comments are searched by body, so a commented
+  word makes the comment a result (but not its post), until it's deleted.
 - **Deleting a comment** (`delete_comment`, `x` in `PostDetail`) removes the
   selected comment only when its author is your profile's name, and toasts
   "Comment deleted". The selection keeps its index, clamped to the list, as
@@ -562,6 +595,9 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   list leaves it at 0. Anyone else's comment, or a post with no comments,
   gets nothing, not even a toast. Reactions, like state, `post_sel` and the
   other posts' comments don't change.
+- **Opening a conversation** (`open_conversation`) is shared by `Enter` on
+  Messaging and a search jump: it marks `chat_sel`'s conversation read, sets
+  `open_chat`, clears `reply` and focuses the reply box (`Mode::Reply`).
 - **Text boxes:** a key is typed when it is `KeyCode::Char` without Ctrl or
   Alt. Shift is fine.
 
@@ -621,6 +657,8 @@ the way `1`-`5` do (so leaving Notifications ends the visit):
 | suggestion `i` | My Network, `network_sel = invitations + i` |
 | job `i` | Jobs, `job_sel = i` |
 | post `i` | Home feed (not the post view), `post_sel = i` |
+| comment `c` of post `p` | Home, `post_sel = p`, the post view with `PostDetail { comment: c }`: the comment is selected and scrolled into view, and `j`/`k` carry on from it. Esc goes back to the feed on post `p` |
+| conversation `i` | Messaging, `chat_sel = i`, opened as `Enter` on it opens it: `open_chat = Some(i)`, marked read (the badge drops), reply draft cleared, reply box focused |
 
 `Enter` with no results, or an empty query, toasts "No results" and keeps
 search open with the query. `Esc` closes it and discards the query. `Tab`,
@@ -677,13 +715,19 @@ in tmux: after `q`, and after a temporarily injected panic, `stty` matched
 its state from before launch, the alternate screen was off and the cursor was
 visible. Both were checked again after the comment box was added, the panic
 injected while the box had focus, and again after the Send picker was added,
-the panic injected while the picker was open.
+the panic injected while the picker was open. After search learned comments
+and messages, both were checked again in a 120×30 private tmux session:
+`q` after jumping to a conversation, and a temporarily injected panic fired
+by a key while search showed `typo`'s post, comment and message results.
+Each time `stty -a` matched its output from before launch, the alternate
+screen was off and the cursor was visible. The injected panic was then
+removed.
 
 ## Testing
 
-97 unit tests, run with `cargo test` (about 7 s):
+112 unit tests, run with `cargo test` (about 20 s):
 
-- **`app.rs`** (48), on the seed data:
+- **`app.rs`** (55), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -718,7 +762,8 @@ the panic injected while the picker was open.
   - `BRIGHT`, `brightkettle` and `  bRiGhT ` give exactly Baptiste Moreau,
     Mateo Achebe, Developer Advocate at Brightkettle, then Tobias
     Ferreira-Lund's and Hana Sorensen's posts. Headlines, bodies and
-    locations match. Comments, news and blank queries don't.
+    locations match, and so does a comment (`Number 5 is the real secret`).
+    News and blank queries don't.
   - Live results: an accepted invitation drops out, a published
     `Rust meetup at Brightkettle` is the first post result, and a connected
     suggestion is pending.
@@ -743,7 +788,8 @@ the panic injected while the picker was open.
     keeps the new comment selected. Empty and whitespace-only drafts toast
     "Write something first" and keep focus and the draft.
   - A comment on Lucia Brandt's post survives Esc, a trip to Jobs and back and
-    reopening the post. `zebra` from `zebra crossing` finds nothing.
+    reopening the post. `zebra` from `zebra crossing` finds that comment only,
+    not the post.
   - Deleting: with three comments of yours after Maren Holt's three, `x` on
     the middle one leaves the third under the cursor, `x` on the last moves
     the cursor up, each with "Comment deleted", until only the seed is left.
@@ -782,13 +828,45 @@ the panic injected while the picker was open.
     comment selected), every selection, `open_chat`, the reply draft, the
     conversations' order and `unread` flags, the badge (2), and every post's
     reactions, like state and comments are unchanged. A second send adds a
-    second message, and `Shared a post` isn't a search result. Sending from
-    the feed returns to the feed with the same post.
+    second message, and `Shared a post` finds Felix's conversation once,
+    showing the newer of the two. Sending from the feed returns to the feed
+    with the same post.
   - Sending to Maren Holt, who is unread, keeps her unread and the badge at
     2. `Enter` with `zqzq` toasts "No matches" and keeps the filter. A post
     you published is sent as `Shared a post by Jordan Vale: …` with the
     trimmed text.
-- **`ui.rs`** (49), rendering into a `TestBackend`:
+  - Comments and messages: `typo` gives exactly Felix Abernathy's post, Maren
+    Holt's comment on it and Felix's conversation (`Post(6)`,
+    `Comment { post: 6, comment: 0 }`,
+    `Conversation { chat: 3, message: Some(2) }`); `caching` gives Hana
+    Sorensen's comment and Maren Holt's conversation; `felix` gives his post
+    and his conversation but neither of his comments; `thanks` gives Wendell
+    Achterberg's post, then Ines Okonkwo (two matching messages, one result)
+    and Felix Abernathy. `bright` is unchanged. `the` lists comments by post,
+    then in post view order.
+  - The chosen message: `thanks` picks Ines Okonkwo's message 1 (your reply,
+    not her older match) and Felix Abernathy's message 0 (his only match, not
+    his newest), and `felix`, a name-only match, picks his newest, message 2.
+  - A commenter's name (`noor haddad` is only the invitation), comment and
+    conversation headlines (`quillfeather`, `Technical Recruiter`), news
+    (`standing desks`) and notifications (`impressions`) don't make comment
+    or conversation results.
+  - `Enter` on Maren Holt's `typo` comment, from the post view of another
+    post, lands on Felix's post (`post_sel = 6`) with
+    `PostDetail { comment: 0 }`, and Esc returns to the feed on his post.
+    From Jobs, `roadmap` lands on Wendell Achterberg's third comment, and `k`
+    moves to the second.
+  - `Enter` on Ravi Tenorio's conversation (`agenda`, the third result)
+    opens it on Messaging: `chat_sel` and `open_chat` 1, read, the badge from
+    2 to 1, a stale reply draft cleared, the reply box focused (a typed reply
+    sends), and every snapshot field the same as `Enter` on him in Messaging.
+  - Jumping to a comment or a conversation from Notifications ends the visit.
+  - Live: a comment you post is found (and not by your name), follows its
+    post down the feed when you publish, and is gone once deleted. A reply to
+    Ines makes her conversation match. After sharing Maren Holt's post to
+    Felix with `s`, `shared a post` finds his conversation, and Enter opens
+    that conversation.
+- **`ui.rs`** (57), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
@@ -933,6 +1011,35 @@ the panic injected while the picker was open.
   - The Home, post view and picker footers read exactly as listed in "Key
     bindings" at 80×24, are at most 80 columns, and they and every picker
     label are single width.
+  - Comments and messages at 120×30: `typo` shows `Posts`, `Comments`,
+    `Messages` with `Maren Holt · on Felix Abernathy's post` / `Welcome
+    aboard. The typo had it coming.` and `Felix Abernathy` / `On to the next
+    typo.`; `caching` shows both new kinds; with a comment and a reply added,
+    `bright` has all five groups in order (the end scrolls into view); the
+    new empty prompt.
+  - The conversation row: `thanks` shows `You: Thanks Ines, I'll keep it in
+    mind.` and Felix's only match rather than his newest message; `felix`
+    (name only) shows the newest message with no bold on it; a newer matching
+    reply takes over.
+  - Bold: `typo` gives exactly three `typo` runs, none on the comment's first
+    line. `you` after replying `See you there` bolds only the body's `you`,
+    never `You: `; `thanks` bolds `thanks`, `Thanks`, `Thanks`. With your
+    comment `Holt's team rocks`, `holt` bolds nothing on
+    `Jordan Vale · on Maren Holt's post`.
+  - Excerpts: a match at the end of a long comment and a long reply shows
+    `…` (or `You: …`) and that end, starting on a word, at 120×30 and 60×20;
+    with `İstanbul` in both, `stan` keeps the word whole and bolds exactly
+    `stan`, at 120, 60 and 40 columns.
+  - A read conversation's overlay cells equal an unread one's.
+  - At 80×24, `Enter` on `roadmap` shows Wendell Achterberg's third comment
+    with the `┃` bar, which isn't on screen with the first comment selected.
+  - A published comment and a sent reply of 3,000 characters mixing `日本語`
+    and ASCII, ending in `bright終了`: `bright` (all five groups, first and
+    last selected), `終了` and `日本語` (CJK only, comment and message), over
+    the post view, and over Felix's open thread, at every size from 1×1 to
+    140×40: every row of the box starts and ends with its border and is
+    exactly its width by display width. At 120×30 `終了` shows both excerpts
+    with the match bold. The new labels are single width.
 
 These were checked by breaking the code on purpose and restoring it:
 case-sensitive matching fails 8 tests (including the `BRIGHT` one), taking
@@ -1001,7 +1108,30 @@ names (no bold at all). Leaving the selection alone on `Backspace` in
 (search) and `send_selection_clamps_and_resets_when_the_filter_changes`
 (the picker), since they share it.
 
+For searching comments and messages, each break was caught and then
+restored: choosing the oldest matching message instead of the newest
+(`position` for `rposition` in `App::search_hits`) fails 4
+(`comments_and_conversations_are_found_in_order`,
+`sending_maren_holts_post_to_felix`,
+`a_conversation_shows_its_newest_matching_message` and
+`bold_marks_only_the_match_in_comment_and_message_rows`); matching comment
+authors fails 5 (`comments_and_conversations_are_found_in_order`,
+`authors_headlines_news_and_notifications_dont_match`,
+`comments_you_post_or_delete_are_found_or_not`,
+`a_conversation_shows_its_newest_matching_message` and
+`bold_marks_only_the_match_in_comment_and_message_rows`); landing
+with the comment's index as `post_sel` fails
+`enter_on_a_comment_opens_its_post_with_the_comment_selected`,
+`comments_you_post_or_delete_are_found_or_not` and
+`enter_on_a_comment_far_down_shows_it_selected_at_80x24`; opening the
+conversation without marking it read fails
+`enter_on_a_conversation_opens_it_like_messaging_does`; drawing `You: ` bold
+fails `bold_marks_only_the_match_in_comment_and_message_rows`,
+`excerpts_for_matches_deep_in_a_long_comment_and_message` and
+`long_comments_and_replies_stay_inside_the_search_border_at_every_size`; and
+searching conversation headlines fails
+`authors_headlines_news_and_notifications_dont_match`.
+
 ## Ideas
 
-Repost, searching comments and messages, scrolling long
-job descriptions, profile pages, mouse support.
+Repost, scrolling long job descriptions, profile pages, mouse support.

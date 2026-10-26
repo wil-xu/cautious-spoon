@@ -137,6 +137,18 @@ pub(crate) enum SearchHit {
     Suggestion(usize),
     Job(usize),
     Post(usize),
+    /// Comment `comment` of post `post`.
+    Comment {
+        post: usize,
+        comment: usize,
+    },
+    /// Conversation `chat`, showing its message `message`: the newest one
+    /// whose body matches, or the newest one when only the name matches.
+    /// `None` only for a conversation with no messages.
+    Conversation {
+        chat: usize,
+        message: Option<usize>,
+    },
 }
 
 /// What a search query matches against: trimmed and lowercased. The same
@@ -271,8 +283,12 @@ impl App {
     }
 
     /// Everything that matches `query`, from the current state: people
-    /// (invitations, then suggestions), then jobs, then posts in feed order.
-    /// A query that is empty once trimmed matches nothing.
+    /// (invitations, then suggestions), then jobs, then posts in feed order,
+    /// then comments (by post in feed order, then as the post view lists
+    /// them), then conversations in Messaging list order. A comment matches
+    /// by its body only, and a conversation by its name or any message body,
+    /// once however many messages match. A query that is empty once trimmed
+    /// matches nothing.
     pub(crate) fn search_hits(&self, query: &str) -> Vec<SearchHit> {
         let needle = search_needle(query);
         if needle.is_empty() {
@@ -298,6 +314,20 @@ impl App {
         for (i, post) in self.posts.iter().enumerate() {
             if found(&[post.author, post.headline, &post.body]) {
                 hits.push(SearchHit::Post(i));
+            }
+        }
+        for (post, p) in self.posts.iter().enumerate() {
+            for (comment, c) in p.comments.iter().enumerate() {
+                if found(&[&c.body]) {
+                    hits.push(SearchHit::Comment { post, comment });
+                }
+            }
+        }
+        for (chat, c) in self.conversations.iter().enumerate() {
+            let newest_match = c.messages.iter().rposition(|m| found(&[&m.body]));
+            if newest_match.is_some() || found(&[c.name]) {
+                let message = newest_match.or_else(|| c.messages.len().checked_sub(1));
+                hits.push(SearchHit::Conversation { chat, message });
             }
         }
         hits
@@ -442,6 +472,16 @@ impl App {
             SearchHit::Post(i) => {
                 self.set_tab(Tab::Home);
                 self.post_sel = i;
+            }
+            SearchHit::Comment { post, comment } => {
+                self.set_tab(Tab::Home);
+                self.post_sel = post;
+                self.mode = Mode::PostDetail { comment };
+            }
+            SearchHit::Conversation { chat, .. } => {
+                self.set_tab(Tab::Messaging);
+                self.chat_sel = chat;
+                self.open_conversation();
             }
         }
     }
@@ -689,9 +729,15 @@ impl App {
     }
 
     fn on_messaging_key(&mut self, code: KeyCode) {
-        if code == KeyCode::Enter
-            && let Some(chat) = self.conversations.get_mut(self.chat_sel)
-        {
+        if code == KeyCode::Enter {
+            self.open_conversation();
+        }
+    }
+
+    /// Opens the selected conversation on the right of Messaging: marks it
+    /// read, clears the reply draft and focuses the reply box.
+    fn open_conversation(&mut self) {
+        if let Some(chat) = self.conversations.get_mut(self.chat_sel) {
             chat.unread = false;
             self.open_chat = Some(self.chat_sel);
             self.reply.clear();
@@ -785,6 +831,16 @@ mod tests {
                     format!("{} at {}", app.jobs[i].title, app.jobs[i].company),
                 ),
                 SearchHit::Post(i) => ("post", app.posts[i].author.to_owned()),
+                SearchHit::Comment { post, comment } => (
+                    "comment",
+                    format!(
+                        "{} on {}",
+                        app.posts[post].comments[comment].author, app.posts[post].author
+                    ),
+                ),
+                SearchHit::Conversation { chat, .. } => {
+                    ("conversation", app.conversations[chat].name.to_owned())
+                }
             })
             .collect()
     }
@@ -1116,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_survives_leaving_the_post_and_isnt_searched() {
+    fn a_comment_survives_leaving_the_post_and_is_searched() {
         let mut app = App::new();
         for _ in 0..7 {
             press(&mut app, KeyCode::Char('j'));
@@ -1141,8 +1197,14 @@ mod tests {
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].body, "zebra crossing");
 
-        // Comments aren't searched.
-        assert!(app.search_hits("zebra").is_empty());
+        // The comment is a result, and doesn't make its post one.
+        assert_eq!(
+            app.search_hits("zebra"),
+            [SearchHit::Comment {
+                post: 7,
+                comment: 0
+            }]
+        );
     }
 
     #[test]
@@ -1679,8 +1741,14 @@ mod tests {
         assert_eq!(named_hits(&app, "recruiter")[0].1, "Ines Okonkwo");
         assert!(named_hits(&app, "CI queue").contains(&("post", "Maren Holt".to_owned())));
         assert!(!named_hits(&app, "lisbon").is_empty());
-        // Comments, messages, notifications and news aren't searched.
-        assert!(named_hits(&app, "Number 5 is the real secret").is_empty());
+        // Comments are searched; notifications and news aren't.
+        assert_eq!(
+            named_hits(&app, "Number 5 is the real secret"),
+            [(
+                "comment",
+                "Tobias Ferreira-Lund on Casey Lindqvist".to_owned()
+            )]
+        );
         assert!(named_hits(&app, "standing desks").is_empty());
         // An empty or blank query matches nothing.
         assert!(app.search_hits("").is_empty());
@@ -2193,8 +2261,14 @@ mod tests {
         assert_eq!(felix[felix.len() - 2], felix[felix.len() - 1]);
         assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
 
-        // Messages still aren't searched.
-        assert!(app.search_hits("Shared a post").is_empty());
+        // Felix's conversation now matches, once.
+        assert_eq!(
+            app.search_hits("Shared a post"),
+            [SearchHit::Conversation {
+                chat: 3,
+                message: Some(4)
+            }]
+        );
     }
 
     #[test]
@@ -2276,5 +2350,359 @@ mod tests {
             ines.messages.last().expect("sent").body,
             "Shared a post by Jordan Vale: Shipping the Send action today"
         );
+    }
+
+    fn named(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        pairs
+            .iter()
+            .map(|&(kind, name)| (kind, name.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn comments_and_conversations_are_found_in_order() {
+        let app = App::new();
+        assert_eq!(
+            named_hits(&app, "typo"),
+            named(&[
+                ("post", "Felix Abernathy"),
+                ("comment", "Maren Holt on Felix Abernathy"),
+                ("conversation", "Felix Abernathy"),
+            ])
+        );
+        assert_eq!(
+            app.search_hits("typo"),
+            [
+                SearchHit::Post(6),
+                SearchHit::Comment {
+                    post: 6,
+                    comment: 0
+                },
+                SearchHit::Conversation {
+                    chat: 3,
+                    message: Some(2)
+                },
+            ]
+        );
+        // Maren Holt's post says "cached", so only the comment and the
+        // message match.
+        assert_eq!(
+            named_hits(&app, "caching"),
+            named(&[
+                ("comment", "Hana Sorensen on Maren Holt"),
+                ("conversation", "Maren Holt"),
+            ])
+        );
+        // Felix wrote two comments, but a comment's author isn't searched.
+        assert_eq!(
+            named_hits(&app, "felix"),
+            named(&[
+                ("post", "Felix Abernathy"),
+                ("conversation", "Felix Abernathy"),
+            ])
+        );
+        // Ines Okonkwo has two matching messages and is one result.
+        assert_eq!(
+            named_hits(&app, "thanks"),
+            named(&[
+                ("post", "Wendell Achterberg"),
+                ("conversation", "Ines Okonkwo"),
+                ("conversation", "Felix Abernathy"),
+            ])
+        );
+        assert_eq!(
+            app.conversations[2]
+                .messages
+                .iter()
+                .filter(|m| m.body.to_lowercase().contains("thanks"))
+                .count(),
+            2
+        );
+        // The message each conversation result shows, chosen here: the
+        // newest matching one (Ines Okonkwo's is your 28h reply, not her
+        // older message; Felix Abernathy's is his only match, not his newest
+        // message), or the newest one when only the name matches.
+        let conversations = |query: &str| -> Vec<(usize, Option<usize>)> {
+            app.search_hits(query)
+                .into_iter()
+                .filter_map(|h| match h {
+                    SearchHit::Conversation { chat, message } => Some((chat, message)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(conversations("thanks"), [(2, Some(1)), (3, Some(0))]);
+        assert_eq!(
+            app.conversations[2].messages[1].body,
+            "Thanks Ines, I'll keep it in mind."
+        );
+        assert!(app.conversations[2].messages[1].from_me);
+        assert_eq!(
+            app.conversations[3].messages[0].body,
+            "Thanks for reviewing my first PR!"
+        );
+        assert_eq!(app.conversations[3].messages.len(), 3);
+        assert_eq!(conversations("felix"), [(3, Some(2))]);
+        assert_eq!(
+            app.conversations[3].messages[2].body,
+            "On to the next typo."
+        );
+        // `bright` is unchanged.
+        assert_eq!(
+            named_hits(&app, "bright"),
+            named(&[
+                ("invitation", "Baptiste Moreau"),
+                ("suggestion", "Mateo Achebe"),
+                ("job", "Developer Advocate at Brightkettle"),
+                ("post", "Tobias Ferreira-Lund"),
+                ("post", "Hana Sorensen"),
+            ])
+        );
+        // Comments by post in feed order, then as the post view lists them.
+        assert_eq!(
+            app.search_hits("the")
+                .into_iter()
+                .filter_map(|h| match h {
+                    SearchHit::Comment { post, comment } => Some((post, comment)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 1),
+                (6, 0),
+                (8, 1)
+            ]
+        );
+        // Trimmed and any case, as before.
+        assert_eq!(named_hits(&app, "  TyPo "), named_hits(&app, "typo"));
+    }
+
+    #[test]
+    fn authors_headlines_news_and_notifications_dont_match() {
+        let app = App::new();
+        let kinds = |query: &str| -> Vec<&'static str> {
+            named_hits(&app, query)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        };
+        // Noor Haddad commented on Ines Okonkwo's post: only the person.
+        assert_eq!(kinds("noor haddad"), ["invitation"]);
+        // Every comment headline and conversation headline says
+        // Quillfeather, and no comment body or message does.
+        assert!(
+            app.posts
+                .iter()
+                .flat_map(|p| &p.comments)
+                .any(|c| c.headline.contains("Quillfeather"))
+        );
+        let hits = kinds("quillfeather");
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().all(|&k| k != "comment" && k != "conversation"),
+            "{hits:?}"
+        );
+        assert!(
+            kinds("Technical Recruiter")
+                .iter()
+                .all(|&k| k != "conversation")
+        );
+        // News and notifications.
+        assert!(app.search_hits("standing desks").is_empty());
+        assert!(app.search_hits("impressions").is_empty());
+        assert!(app.search_hits("").is_empty());
+        assert!(app.search_hits("   ").is_empty());
+    }
+
+    /// Opens search, types `query`, moves down `down` results and presses
+    /// Enter.
+    fn jump(app: &mut App, query: &str, down: usize) {
+        press(app, KeyCode::Char('/'));
+        type_str(app, query);
+        for _ in 0..down {
+            press(app, KeyCode::Down);
+        }
+        press(app, KeyCode::Enter);
+        assert!(app.search.is_none(), "Enter closes search");
+    }
+
+    #[test]
+    fn enter_on_a_comment_opens_its_post_with_the_comment_selected() {
+        // From the post view of another post, with another comment selected.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        jump(&mut app, "typo", 1);
+        assert_eq!(app.tab, Tab::Home);
+        assert_eq!(app.posts[app.post_sel].author, "Felix Abernathy");
+        assert_eq!(app.post_sel, 6);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        let post = app.selected_post().expect("a post");
+        assert_eq!(post.comments[0].author, "Maren Holt");
+        assert_eq!(
+            post.comments[0].body,
+            "Welcome aboard. The typo had it coming."
+        );
+        assert!(app.status.is_none());
+        // Esc goes back to the feed, on Felix's post.
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            (app.tab, app.mode, app.post_sel),
+            (Tab::Home, Mode::Browse, 6)
+        );
+
+        // From another tab, a comment that isn't the first: j/k carry on
+        // from it.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        jump(&mut app, "roadmap", 0);
+        assert_eq!(app.tab, Tab::Home);
+        assert_eq!(app.posts[app.post_sel].author, "Wendell Achterberg");
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+        assert_eq!(app.post_sel, 8);
+    }
+
+    #[test]
+    fn enter_on_a_conversation_opens_it_like_messaging_does() {
+        let mut app = App::new();
+        app.reply = "a stale draft".to_owned();
+        assert_eq!(app.badge(Tab::Messaging), 2);
+        assert!(app.conversations[1].unread);
+        assert_eq!(
+            named_hits(&app, "agenda"),
+            named(&[
+                ("post", "Ravi Tenorio"),
+                ("comment", "Felix Abernathy on Ravi Tenorio"),
+                ("conversation", "Ravi Tenorio"),
+            ])
+        );
+        jump(&mut app, "agenda", 2);
+        assert_eq!(app.tab, Tab::Messaging);
+        assert_eq!(app.chat_sel, 1);
+        assert_eq!(app.open_chat, Some(1));
+        assert!(!app.conversations[1].unread, "marked read");
+        assert_eq!(app.badge(Tab::Messaging), 1);
+        assert!(app.reply.is_empty());
+        assert_eq!(app.mode, Mode::Reply);
+        // The reply box has focus: keys are typed and Enter sends.
+        type_str(&mut app, "Thursday works");
+        press(&mut app, KeyCode::Enter);
+        let last = app.conversations[1].messages.last().expect("sent");
+        assert!(last.from_me);
+        assert_eq!(last.body, "Thursday works");
+
+        // The same as Enter on it in Messaging.
+        let mut by_hand = App::new();
+        by_hand.reply = "a stale draft".to_owned();
+        press(&mut by_hand, KeyCode::Char('4'));
+        press(&mut by_hand, KeyCode::Char('j'));
+        press(&mut by_hand, KeyCode::Enter);
+        let mut found = App::new();
+        found.reply = "a stale draft".to_owned();
+        jump(&mut found, "agenda", 2);
+        assert_eq!(snapshot(&found), snapshot(&by_hand));
+        assert_eq!(found.reply, by_hand.reply);
+        assert_eq!(
+            found
+                .conversations
+                .iter()
+                .map(|c| c.unread)
+                .collect::<Vec<_>>(),
+            by_hand
+                .conversations
+                .iter()
+                .map(|c| c.unread)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn jumping_to_a_comment_or_conversation_from_notifications_ends_the_visit() {
+        let new = |app: &App| app.notifications.iter().filter(|n| n.is_new).count();
+        for (down, tab) in [(1, Tab::Home), (2, Tab::Messaging)] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char('5'));
+            assert_eq!(new(&app), 3);
+            jump(&mut app, "typo", down);
+            assert_eq!(app.tab, tab);
+            assert_eq!(new(&app), 0, "leaving by a jump clears the markers");
+            assert_eq!(app.badge(Tab::Notifications), 0);
+        }
+    }
+
+    #[test]
+    fn comments_you_post_or_delete_are_found_or_not() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "Zebracorn approved");
+        press(&mut app, KeyCode::Enter);
+        let hit = SearchHit::Comment {
+            post: 0,
+            comment: 3,
+        };
+        assert_eq!(app.search_hits("zebracorn"), [hit]);
+        // Your own name doesn't make it a result: authors aren't searched.
+        assert!(!app.search_hits("jordan").contains(&hit));
+
+        // Publishing a post moves it down the feed, and the hit follows.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "New post");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.search_hits("zebracorn"),
+            [SearchHit::Comment {
+                post: 1,
+                comment: 3
+            }]
+        );
+        jump(&mut app, "zebracorn", 0);
+        assert_eq!(app.post_sel, 1);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+
+        // Deleted, it's gone.
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.status, Some("Comment deleted"));
+        assert!(app.search_hits("zebracorn").is_empty());
+    }
+
+    #[test]
+    fn replies_and_shared_posts_make_their_conversation_match() {
+        let mut app = App::new();
+        assert!(app.search_hits("zebracorn").is_empty());
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "A zebracorn walked in");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.search_hits("zebracorn"),
+            [SearchHit::Conversation {
+                chat: 2,
+                message: Some(2)
+            }]
+        );
+
+        // Maren Holt's post shared to Felix with `s`.
+        let mut app = App::new();
+        assert!(app.search_hits("shared a post").is_empty());
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "felix");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Post sent"));
+        assert_eq!(
+            named_hits(&app, "shared a post"),
+            named(&[("conversation", "Felix Abernathy")])
+        );
+        jump(&mut app, "shared a post", 0);
+        assert_eq!((app.tab, app.open_chat), (Tab::Messaging, Some(3)));
     }
 }
