@@ -191,6 +191,11 @@ pub(crate) struct App {
     /// Index into invitations followed by suggestions, as one list.
     pub network_sel: usize,
     pub job_sel: usize,
+    /// Lines of the Jobs details card scrolled off the top, at most
+    /// `job_scroll_max`. Back to 0 whenever `job_sel` changes.
+    pub job_scroll: usize,
+    /// How far the details card can scroll, set by `fit_job_details`.
+    pub job_scroll_max: usize,
     pub chat_sel: usize,
     pub notif_sel: usize,
     /// The conversation shown on the right of Messaging, opened with Enter.
@@ -239,6 +244,8 @@ impl App {
             post_sel: 0,
             network_sel: 0,
             job_sel: 0,
+            job_scroll: 0,
+            job_scroll_max: 0,
             chat_sel: 0,
             notif_sel: 0,
             open_chat: None,
@@ -260,6 +267,16 @@ impl App {
             Tab::Messaging => self.conversations.iter().filter(|c| c.unread).count(),
             Tab::Notifications => self.notifications.iter().filter(|n| n.unread).count(),
         }
+    }
+
+    /// Tells the app how far the selected job's details can scroll on the
+    /// current screen: the lines that don't fit in the card, as
+    /// `ui::job_scroll_max` measures them. Only the event loop knows the screen
+    /// size, so it calls this before every frame. A screen that grew pulls the
+    /// scroll back, so the next `K` moves the text at once.
+    pub(crate) fn fit_job_details(&mut self, max: usize) {
+        self.job_scroll_max = max;
+        self.job_scroll = self.job_scroll.min(max);
     }
 
     pub(crate) fn saved_jobs(&self) -> usize {
@@ -385,7 +402,13 @@ impl App {
                 let len = self.network_len();
                 step(&mut self.network_sel, len, delta);
             }
-            (Tab::Jobs, _) => step(&mut self.job_sel, self.jobs.len(), delta),
+            (Tab::Jobs, _) => {
+                let before = self.job_sel;
+                step(&mut self.job_sel, self.jobs.len(), delta);
+                if self.job_sel != before {
+                    self.job_scroll = 0;
+                }
+            }
             (Tab::Messaging, _) => step(&mut self.chat_sel, self.conversations.len(), delta),
             (Tab::Notifications, _) => step(&mut self.notif_sel, self.notifications.len(), delta),
         }
@@ -468,6 +491,7 @@ impl App {
             SearchHit::Job(i) => {
                 self.set_tab(Tab::Jobs);
                 self.job_sel = i;
+                self.job_scroll = 0;
             }
             SearchHit::Post(i) => {
                 self.set_tab(Tab::Home);
@@ -711,6 +735,8 @@ impl App {
             return;
         };
         match code {
+            KeyCode::Char('J') => self.job_scroll = (self.job_scroll + 1).min(self.job_scroll_max),
+            KeyCode::Char('K') => self.job_scroll = self.job_scroll.saturating_sub(1),
             KeyCode::Char('s') => {
                 job.saved = !job.saved;
                 self.status = Some(if job.saved {
@@ -2704,5 +2730,302 @@ mod tests {
         );
         jump(&mut app, "shared a post", 0);
         assert_eq!((app.tab, app.open_chat), (Tab::Messaging, Some(3)));
+    }
+
+    // ------------------------------------------------- Job details scroll
+
+    /// `J` or `K` as the terminal sends it, with Shift held.
+    fn shift(app: &mut App, ch: char) {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT));
+    }
+
+    /// Jobs, with the selected job's details `max` lines longer than the
+    /// card, as the event loop would report for a short terminal.
+    fn jobs_overflowing(max: usize) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        app.fit_job_details(max);
+        app
+    }
+
+    /// Everything a scroll key must leave alone: every selection, the tab and
+    /// mode, the open thread, the jobs' saved and applied flags, every
+    /// post's reactions and like state, the people lists, the drafts, the
+    /// overlays and the toast.
+    type Unscrolled = (
+        Snapshot,
+        Vec<(bool, bool)>,
+        Unsent,
+        (usize, usize),
+        (String, String),
+        (bool, bool, Option<&'static str>, bool),
+    );
+
+    fn unscrolled(app: &App) -> Unscrolled {
+        (
+            snapshot(app),
+            app.jobs.iter().map(|j| (j.saved, j.applied)).collect(),
+            unsent(app),
+            (
+                app.invitations.len(),
+                app.suggestions.iter().filter(|s| s.pending).count(),
+            ),
+            (app.draft.clone(), app.comment_draft.clone()),
+            (
+                app.search.is_some(),
+                app.send.is_some(),
+                app.status,
+                app.should_quit,
+            ),
+        )
+    }
+
+    #[test]
+    fn shift_j_and_k_scroll_the_details_one_line_and_stop_at_the_end() {
+        let mut app = jobs_overflowing(3);
+        let before = unscrolled(&app);
+        for want in [1, 2, 3, 3] {
+            shift(&mut app, 'J');
+            assert_eq!(app.job_scroll, want);
+        }
+        for want in [2, 1, 0, 0] {
+            shift(&mut app, 'K');
+            assert_eq!(app.job_scroll, want);
+        }
+        assert_eq!(unscrolled(&app), before, "only the scroll moves");
+    }
+
+    #[test]
+    fn k_at_the_top_changes_nothing() {
+        let mut app = jobs_overflowing(3);
+        let before = unscrolled(&app);
+        shift(&mut app, 'K');
+        assert_eq!(app.job_scroll, 0);
+        assert_eq!(unscrolled(&app), before);
+    }
+
+    #[test]
+    fn shift_j_and_k_do_nothing_on_other_tabs() {
+        for keys in [&['1'][..], &['2'], &['4'], &['5'], &['5', '5']] {
+            let mut app = jobs_overflowing(5);
+            shift(&mut app, 'J');
+            for &key in keys {
+                press(&mut app, KeyCode::Char(key));
+            }
+            let before = unscrolled(&app);
+            for ch in "JJKJ".chars() {
+                shift(&mut app, ch);
+                assert_eq!(app.job_scroll, 1, "{keys:?}");
+                assert_eq!(unscrolled(&app), before, "{keys:?}");
+            }
+            press(&mut app, KeyCode::Char('3'));
+            assert_eq!(app.job_scroll, 1, "{keys:?}: kept for Jobs");
+        }
+
+        // The post view and an open thread too.
+        let mut app = maren_post_view();
+        app.fit_job_details(5);
+        press(&mut app, KeyCode::Char('j'));
+        let before = unscrolled(&app);
+        shift(&mut app, 'J');
+        shift(&mut app, 'K');
+        assert_eq!((app.job_scroll, unscrolled(&app)), (0, before));
+
+        let mut app = App::new();
+        app.fit_job_details(5);
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        let before = unscrolled(&app);
+        shift(&mut app, 'J');
+        assert_eq!((app.job_scroll, unscrolled(&app)), (0, before));
+    }
+
+    #[test]
+    fn the_first_k_after_overscrolling_moves_the_text() {
+        let mut app = jobs_overflowing(4);
+        for _ in 0..14 {
+            shift(&mut app, 'J');
+        }
+        assert_eq!(app.job_scroll, 4, "J stops at the end");
+        shift(&mut app, 'K');
+        assert_eq!(app.job_scroll, 3, "one line up at once");
+    }
+
+    #[test]
+    fn the_first_k_after_the_screen_grows_moves_the_text() {
+        let mut app = jobs_overflowing(6);
+        for _ in 0..8 {
+            shift(&mut app, 'J');
+        }
+        assert_eq!(app.job_scroll, 6);
+        // The terminal grows: only two lines are hidden now.
+        app.fit_job_details(2);
+        assert_eq!(app.job_scroll, 2, "pulled back to the new end");
+        shift(&mut app, 'K');
+        assert_eq!(app.job_scroll, 1);
+        shift(&mut app, 'J');
+        shift(&mut app, 'J');
+        assert_eq!(app.job_scroll, 2);
+
+        // Big enough for everything: back to the top, and J does nothing.
+        app.fit_job_details(0);
+        assert_eq!(app.job_scroll, 0);
+        shift(&mut app, 'J');
+        assert_eq!(app.job_scroll, 0);
+
+        // Shrinking keeps the line the card starts on.
+        let mut app = jobs_overflowing(3);
+        shift(&mut app, 'J');
+        app.fit_job_details(9);
+        assert_eq!(app.job_scroll, 1);
+    }
+
+    #[test]
+    fn moving_through_the_jobs_starts_each_at_the_top() {
+        for (key, start) in [
+            (KeyCode::Char('j'), 0),
+            (KeyCode::Down, 0),
+            (KeyCode::Char('k'), 2),
+            (KeyCode::Up, 2),
+        ] {
+            let mut app = jobs_overflowing(5);
+            while app.job_sel < start {
+                press(&mut app, KeyCode::Char('j'));
+            }
+            shift(&mut app, 'J');
+            shift(&mut app, 'J');
+            press(&mut app, key);
+            assert_ne!(app.job_sel, start, "{key:?}");
+            assert_eq!(app.job_scroll, 0, "{key:?}");
+        }
+
+        // `j` on the last job and `k` on the first don't change `job_sel`, so
+        // they keep the scroll.
+        let mut app = jobs_overflowing(5);
+        shift(&mut app, 'J');
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!((app.job_sel, app.job_scroll), (0, 1));
+        while app.job_sel + 1 < app.jobs.len() {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        shift(&mut app, 'J');
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!((app.job_sel, app.job_scroll), (app.jobs.len() - 1, 1));
+    }
+
+    #[test]
+    fn a_search_jump_to_a_job_starts_at_the_top() {
+        // From another job on Jobs: `lisbon` is the Senior Rust Engineer.
+        let mut app = jobs_overflowing(5);
+        press(&mut app, KeyCode::Char('j'));
+        shift(&mut app, 'J');
+        jump(&mut app, "lisbon", 0);
+        assert_eq!((app.tab, app.job_sel, app.job_scroll), (Tab::Jobs, 0, 0));
+
+        // From the same job, and from another tab.
+        let mut app = jobs_overflowing(5);
+        shift(&mut app, 'J');
+        jump(&mut app, "lisbon", 0);
+        assert_eq!((app.job_sel, app.job_scroll), (0, 0));
+
+        let mut app = jobs_overflowing(5);
+        shift(&mut app, 'J');
+        press(&mut app, KeyCode::Char('1'));
+        jump(&mut app, "lisbon", 0);
+        assert_eq!((app.tab, app.job_sel, app.job_scroll), (Tab::Jobs, 0, 0));
+
+        // A jump anywhere else leaves the Jobs scroll alone.
+        let mut app = jobs_overflowing(5);
+        shift(&mut app, 'J');
+        jump(&mut app, "typo", 0);
+        assert_eq!((app.tab, app.job_scroll), (Tab::Home, 1));
+    }
+
+    #[test]
+    fn the_scroll_survives_tabs_search_saving_and_applying() {
+        let mut app = jobs_overflowing(5);
+        shift(&mut app, 'J');
+        shift(&mut app, 'J');
+
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!((app.job_sel, app.job_scroll), (0, 2), "3 then 1 then 3");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.job_scroll, 2, "Tab then BackTab");
+
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "rust");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!((app.tab, app.job_scroll), (Tab::Jobs, 2), "/ then Esc");
+
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job unsaved"));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job saved"));
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.status, Some("Application sent"));
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.status, Some("Already applied"));
+        assert_eq!((app.job_sel, app.job_scroll), (0, 2), "s and e");
+        shift(&mut app, 'K');
+        assert_eq!(app.job_scroll, 1, "and K still moves it");
+    }
+
+    #[test]
+    fn shift_j_and_k_are_typed_in_every_text_box() {
+        // Each box opened with the Jobs details scrolled one line.
+        let scrolled = || {
+            let mut app = jobs_overflowing(5);
+            shift(&mut app, 'J');
+            app
+        };
+        let type_jk = |app: &mut App| {
+            shift(app, 'J');
+            shift(app, 'K');
+            assert_eq!(app.job_scroll, 1);
+        };
+
+        for tab in ['1', '2', '3', '4', '5'] {
+            let mut app = scrolled();
+            press(&mut app, KeyCode::Char(tab));
+            press(&mut app, KeyCode::Char('/'));
+            let before = snapshot(&app);
+            type_jk(&mut app);
+            assert_eq!(query(&app), Some("JK"), "search on {tab}");
+            assert_eq!(snapshot(&app), before, "search on {tab}");
+        }
+
+        let mut app = scrolled();
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('p'));
+        type_jk(&mut app);
+        assert_eq!((app.draft.as_str(), app.mode), ("JK", Mode::Composer));
+
+        let mut app = scrolled();
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('c'));
+        type_jk(&mut app);
+        assert_eq!(app.comment_draft, "JK");
+        assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
+
+        for keys in [&[][..], &[KeyCode::Enter]] {
+            let mut app = scrolled();
+            press(&mut app, KeyCode::Char('1'));
+            for &key in keys {
+                press(&mut app, key);
+            }
+            press(&mut app, KeyCode::Char('s'));
+            type_jk(&mut app);
+            assert_eq!(filter(&app), Some("JK"), "picker after {keys:?}");
+        }
+
+        let mut app = scrolled();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        type_jk(&mut app);
+        assert_eq!((app.reply.as_str(), app.mode), ("JK", Mode::Reply));
     }
 }

@@ -19,6 +19,10 @@ use crate::app::App;
 fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
     let mut app = App::new();
     while !app.should_quit {
+        // `App` never sees the screen, so tell it how far the job details can
+        // scroll at this size before drawing, and before the next key.
+        let size = terminal.size()?;
+        app.fit_job_details(ui::job_scroll_max(&app, size));
         terminal.draw(|frame| ui::draw(frame, &app))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press

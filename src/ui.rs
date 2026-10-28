@@ -3,7 +3,9 @@ use std::ops::Range;
 use ratatui::Frame;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
+use ratatui::layout::Position;
 use ratatui::layout::Rect;
+use ratatui::layout::Size;
 use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -25,6 +27,7 @@ use crate::app::SendPicker;
 use crate::app::Tab;
 use crate::app::first_line;
 use crate::app::search_needle;
+use crate::data::Job;
 use crate::data::Post;
 
 const BLUE: Color = Color::Rgb(10, 102, 194);
@@ -43,6 +46,10 @@ const SIDEBAR_MIN_WIDTH: u16 = 100;
 const PROFILE_MIN_WIDTH: u16 = 80;
 const CARD_BODY_LINES: usize = 3;
 const MESSAGING_LIST_WIDTH: u16 = 34;
+const JOB_DETAILS: &str = " Job details ";
+/// On the details card's top and bottom border while lines are hidden there.
+const MORE_ABOVE: &str = " ↑ more ";
+const MORE_BELOW: &str = " ↓ more ";
 
 /// `now`, `3h`, `2d` or `1w`, as LinkedIn shows on a card.
 fn age(hours: u32) -> String {
@@ -511,6 +518,9 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("tab", "next"),
             ("1-5", "tabs"),
             ("q", "quit"),
+            // Last, so every footer narrower than the full set reads as it
+            // did before the details could scroll.
+            ("J/K", "scroll"),
         ],
         (Tab::Messaging, Mode::Browse) => &[
             ("j/k", "move"),
@@ -1497,49 +1507,13 @@ fn render_network(frame: &mut Frame, app: &App, area: Rect) {
 
 // ---------------------------------------------------------------- Jobs
 
-fn render_jobs(frame: &mut Frame, app: &App, area: Rect) {
-    let [list_area, detail_area] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
+/// The Jobs list and details card in the body `area`.
+fn jobs_areas(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area)
+}
 
-    let block = card(" Jobs for you ", false);
-    let inner = block.inner(list_area);
-    frame.render_widget(block, list_area);
-    let width = usize_of(inner.width.saturating_sub(1));
-    let items = app
-        .jobs
-        .iter()
-        .map(|job| {
-            let star = if job.saved { " ★" } else { "" };
-            let mut place = vec![Span::styled(
-                format!("{} · {}", job.location, job.workplace.label()),
-                Style::new().fg(DIM),
-            )];
-            if job.applied {
-                place.push(Span::styled("  Applied", Style::new().fg(GREEN).bold()));
-            }
-            vec![
-                Line::from(vec![
-                    Span::styled(
-                        truncate(job.title, width.saturating_sub(2)),
-                        Style::new().fg(LIGHT_BLUE).bold(),
-                    ),
-                    Span::styled(star, Style::new().fg(LIGHT_BLUE)),
-                ]),
-                Line::styled(truncate(job.company, width), Style::new().fg(Color::White)),
-                Line::from(place),
-            ]
-        })
-        .collect();
-    render_list(frame, inner, items, Some(app.job_sel));
-
-    let Some(job) = app.jobs.get(app.job_sel) else {
-        return;
-    };
-    let block = card(" Job details ", false);
-    let inner = block.inner(detail_area);
-    let width = usize_of(inner.width);
-    frame.render_widget(block, detail_area);
-
+/// Everything in the details card, one row per line, unscrolled.
+fn job_detail_lines(job: &Job, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = wrap(job.title, width)
         .into_iter()
         .map(|l| Line::styled(l, Style::new().fg(Color::White).bold()))
@@ -1580,7 +1554,88 @@ fn render_jobs(frame: &mut Frame, app: &App, area: Rect) {
             .into_iter()
             .map(|l| Line::styled(l, Style::new().fg(Color::Gray))),
     );
-    frame.render_widget(Paragraph::new(lines), inner);
+    lines
+}
+
+/// The lines of the selected job's details that don't fit in the card on a
+/// `screen`-sized terminal: how far `J` can scroll. The event loop hands it to
+/// `App::fit_job_details` before every frame, since `App` never sees the
+/// screen.
+pub(crate) fn job_scroll_max(app: &App, screen: Size) -> usize {
+    let body = screen_areas(Rect::from((Position::ORIGIN, screen)))[1];
+    let inner = card(JOB_DETAILS, false).inner(jobs_areas(body)[1]);
+    app.jobs.get(app.job_sel).map_or(0, |job| {
+        job_detail_lines(job, usize_of(inner.width))
+            .len()
+            .saturating_sub(usize_of(inner.height))
+    })
+}
+
+fn render_jobs(frame: &mut Frame, app: &App, area: Rect) {
+    let [list_area, detail_area] = jobs_areas(area);
+
+    let block = card(" Jobs for you ", false);
+    let inner = block.inner(list_area);
+    frame.render_widget(block, list_area);
+    let width = usize_of(inner.width.saturating_sub(1));
+    let items = app
+        .jobs
+        .iter()
+        .map(|job| {
+            let star = if job.saved { " ★" } else { "" };
+            let mut place = vec![Span::styled(
+                format!("{} · {}", job.location, job.workplace.label()),
+                Style::new().fg(DIM),
+            )];
+            if job.applied {
+                place.push(Span::styled("  Applied", Style::new().fg(GREEN).bold()));
+            }
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        truncate(job.title, width.saturating_sub(2)),
+                        Style::new().fg(LIGHT_BLUE).bold(),
+                    ),
+                    Span::styled(star, Style::new().fg(LIGHT_BLUE)),
+                ]),
+                Line::styled(truncate(job.company, width), Style::new().fg(Color::White)),
+                Line::from(place),
+            ]
+        })
+        .collect();
+    render_list(frame, inner, items, Some(app.job_sel));
+
+    let Some(job) = app.jobs.get(app.job_sel) else {
+        return;
+    };
+    let mut block = card(JOB_DETAILS, false);
+    let inner = block.inner(detail_area);
+    let lines = job_detail_lines(job, usize_of(inner.width));
+    // `App` keeps the scroll within what fits on the screen it was last told
+    // about. Clamping again here keeps a frame drawn before it hears of a
+    // resize right too: no blank rows below the end while lines above are
+    // hidden.
+    let max = lines.len().saturating_sub(usize_of(inner.height));
+    let scroll = app.job_scroll.min(max);
+
+    // An indicator goes in only where it fits whole, between the corners and,
+    // on the top border, a column clear of the title. A card one row high has
+    // its top and bottom border on the same row, so it gets none.
+    let room = usize_of(detail_area.width.saturating_sub(2));
+    let more = |text: &'static str| Line::styled(text, Style::new().fg(LIGHT_BLUE)).right_aligned();
+    if detail_area.height >= 2 {
+        if scroll > 0 && width_of(JOB_DETAILS) + 1 + width_of(MORE_ABOVE) <= room {
+            block = block.title_top(more(MORE_ABOVE));
+        }
+        if scroll < max && width_of(MORE_BELOW) <= room {
+            block = block.title_bottom(more(MORE_BELOW));
+        }
+    }
+    frame.render_widget(block, detail_area);
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(scroll).collect::<Vec<_>>()),
+        inner,
+    );
 }
 
 // ----------------------------------------------------------- Messaging
@@ -1816,6 +1871,10 @@ mod tests {
         };
         let mut commented = comment("Agreed, the meeting-to-doc rule works");
         press(&mut commented, KeyCode::Enter);
+        let jobs_partway = jobs_after_j(2, 60, 20);
+        let mut jobs_bottom = jobs_after_j(0, 60, 20);
+        // Past the end on every screen, so it draws as the bottom at each size.
+        jobs_bottom.job_scroll = usize::MAX;
         vec![
             ("home", at(&[], "")),
             ("detail", at(&[KeyCode::Char('j'), KeyCode::Enter], "")),
@@ -1837,6 +1896,8 @@ mod tests {
             ),
             ("jobs", at(&[KeyCode::Char('3'), KeyCode::Char('s')], "")),
             ("jobs toast", toast),
+            ("jobs partway", jobs_partway),
+            ("jobs bottom", jobs_bottom),
             ("messaging", at(&[KeyCode::Char('4')], "")),
             (
                 "reply",
@@ -2473,6 +2534,308 @@ mod tests {
         }
         press(&mut app, KeyCode::Char('c'));
         assert!(screen(&app, 120, 30).contains("◷ Pending"));
+    }
+
+    /// What the event loop does before every frame: tells the app how far the
+    /// job details scroll on a `width`×`height` screen.
+    fn fit(app: &mut App, width: u16, height: u16) {
+        app.fit_job_details(job_scroll_max(app, Size::new(width, height)));
+    }
+
+    /// Jobs on a `width`×`height` screen after `J` `n` times, each key fitted
+    /// to the screen first, as the event loop delivers it.
+    fn jobs_after_j(n: usize, width: u16, height: u16) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        for _ in 0..n {
+            fit(&mut app, width, height);
+            press(&mut app, KeyCode::Char('J'));
+        }
+        fit(&mut app, width, height);
+        app
+    }
+
+    /// The Job details card on a `width`×`height` screen.
+    fn job_card(width: u16, height: u16) -> Rect {
+        jobs_areas(screen_areas(Rect::new(0, 0, width, height))[1])[1]
+    }
+
+    /// The details card's top border, its inside rows with the trailing
+    /// blanks trimmed, and its bottom border.
+    fn job_card_rows(app: &App, width: u16, height: u16) -> (String, Vec<String>, String) {
+        let buf = buffer(app, width, height);
+        let area = job_card(width, height);
+        let inner = card(JOB_DETAILS, false).inner(area);
+        let rows = (inner.y..inner.bottom())
+            .map(|y| {
+                text_between(&buf, y, inner.x, inner.right())
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect();
+        (
+            text_between(&buf, area.y, area.x, area.right()),
+            rows,
+            text_between(&buf, area.bottom() - 1, area.x, area.right()),
+        )
+    }
+
+    /// A border of `─` between its two corners.
+    fn plain_border(row: &str, left: char, right: char) -> bool {
+        let inside: Vec<char> = row.chars().collect();
+        inside.first() == Some(&left)
+            && inside.last() == Some(&right)
+            && inside[1..inside.len() - 1].iter().all(|&c| c == '─')
+    }
+
+    #[test]
+    fn the_end_of_a_long_job_description_can_be_reached() {
+        let app = jobs_after_j(30, 80, 20);
+        let s = screen(&app, 80, 20);
+        assert!(s.contains("non-engineer."), "{s}");
+    }
+
+    #[test]
+    fn long_details_start_at_the_top_with_more_below() {
+        let app = jobs_after_j(0, 80, 20);
+        let (top, rows, bottom) = job_card_rows(&app, 80, 20);
+        assert!(
+            top.starts_with("╭ Job details ─") && top.ends_with("─╮"),
+            "{top}"
+        );
+        assert!(!top.contains("↑ more"), "{top}");
+        assert!(
+            bottom.starts_with("╰─") && bottom.ends_with("─ ↓ more ╯"),
+            "{bottom}"
+        );
+        assert_eq!(
+            rows.first().map(String::as_str),
+            Some("Senior Rust Engineer")
+        );
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("You have shipped Rust in production, enjoy")
+        );
+    }
+
+    #[test]
+    fn scrolled_to_the_bottom_the_last_line_is_on_the_last_row() {
+        let mut app = jobs_after_j(2, 80, 20);
+        assert_eq!(app.job_scroll, app.job_scroll_max);
+        let (top, rows, bottom) = job_card_rows(&app, 80, 20);
+        assert!(
+            top.starts_with("╭ Job details ─") && top.ends_with("─ ↑ more ╮"),
+            "{top}"
+        );
+        assert!(plain_border(&bottom, '╰', '╯'), "{bottom}");
+        assert_eq!(rows.last().map(String::as_str), Some("to a non-engineer."));
+
+        // More `J` changes nothing, and the first `K` moves the text.
+        let at_bottom = screen(&app, 80, 20);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('J'));
+            fit(&mut app, 80, 20);
+            assert_eq!(screen(&app, 80, 20), at_bottom);
+        }
+        press(&mut app, KeyCode::Char('K'));
+        fit(&mut app, 80, 20);
+        let (_, rows, bottom) = job_card_rows(&app, 80, 20);
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("writing tests, and can explain a tricky bug")
+        );
+        assert!(bottom.ends_with("─ ↓ more ╯"), "{bottom}");
+    }
+
+    #[test]
+    fn partway_down_both_indicators_show() {
+        let app = jobs_after_j(1, 60, 20);
+        assert!(app.job_scroll > 0 && app.job_scroll < app.job_scroll_max);
+        let (top, rows, bottom) = job_card_rows(&app, 60, 20);
+        assert!(
+            top.starts_with("╭ Job details ─") && top.ends_with("─ ↑ more ╮"),
+            "{top}"
+        );
+        assert!(
+            bottom.starts_with("╰─") && bottom.ends_with("─ ↓ more ╯"),
+            "{bottom}"
+        );
+        assert_eq!(
+            rows.first().map(String::as_str),
+            Some("Quillfeather Systems")
+        );
+    }
+
+    #[test]
+    fn details_that_fit_show_no_indicators_and_dont_scroll() {
+        let mut app = jobs_after_j(0, 120, 30);
+        for job in 0..app.jobs.len() {
+            let s = screen(&app, 120, 30);
+            let (top, rows, bottom) = job_card_rows(&app, 120, 30);
+            assert!(!s.contains("more"), "job {job}:\n{s}");
+            assert!(top.starts_with("╭ Job details ─"), "{top}");
+            assert!(plain_border(&bottom, '╰', '╯'), "{bottom}");
+            assert_eq!(rows[0], app.jobs[job].title);
+            for _ in 0..3 {
+                press(&mut app, KeyCode::Char('J'));
+                fit(&mut app, 120, 30);
+                assert_eq!(screen(&app, 120, 30), s, "job {job}");
+            }
+            press(&mut app, KeyCode::Char('j'));
+            fit(&mut app, 120, 30);
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_grows_shows_no_blank_rows() {
+        let unscrolled = screen(&jobs_after_j(0, 120, 30), 120, 30);
+        let mut app = jobs_after_j(20, 60, 20);
+        assert!(app.job_scroll > 0);
+        // The first frame at the new size, before the app hears of it, and
+        // the ones after.
+        assert_eq!(screen(&app, 120, 30), unscrolled);
+        fit(&mut app, 120, 30);
+        assert_eq!(app.job_scroll, 0);
+        assert_eq!(screen(&app, 120, 30), unscrolled);
+
+        // Growing only a little keeps the end on the last row.
+        let mut app = jobs_after_j(20, 60, 20);
+        for fitted in [false, true] {
+            if fitted {
+                fit(&mut app, 60, 23);
+            }
+            let (top, rows, bottom) = job_card_rows(&app, 60, 23);
+            assert_eq!(rows.last().map(String::as_str), Some("a non-engineer."));
+            assert!(top.ends_with("─ ↑ more ╮"), "{top}");
+            assert!(plain_border(&bottom, '╰', '╯'), "{bottom}");
+        }
+        let before = job_card_rows(&app, 60, 23).1;
+        press(&mut app, KeyCode::Char('K'));
+        fit(&mut app, 60, 23);
+        let after = job_card_rows(&app, 60, 23).1;
+        assert_eq!(after[1..], before[..before.len() - 1], "one line down");
+    }
+
+    /// The details card's corners and indicators on one screen size.
+    fn check_job_card(app: &App, name: &str, width: u16, height: u16) {
+        let area = job_card(width, height);
+        let at = format!("{name} at {width}x{height}");
+        let buf = buffer(app, width, height);
+        let top = text_between(&buf, area.y, area.x, area.right());
+        if area.height == 1 {
+            // The top and bottom border share the row: no indicator.
+            assert!(!top.contains("more"), "{at}: {top}");
+        }
+        if area.width < 2 || area.height < 2 {
+            return;
+        }
+        let corners = [
+            (area.x, area.y),
+            (area.right() - 1, area.y),
+            (area.x, area.bottom() - 1),
+            (area.right() - 1, area.bottom() - 1),
+        ]
+        .map(|(x, y)| buf[(x, y)].symbol().to_owned());
+        assert_eq!(corners, ["╭", "╮", "╰", "╯"], "{at}");
+
+        let max = job_scroll_max(app, Size::new(width, height));
+        let scroll = app.job_scroll.min(max);
+        let low = text_between(&buf, area.bottom() - 1, area.x, area.right());
+        let room = usize_of(area.width) - 2;
+        let up_fits = width_of(JOB_DETAILS) + 1 + width_of(MORE_ABOVE) <= room;
+        let down_fits = width_of(MORE_BELOW) <= room;
+        assert_eq!(top.contains("↑ more"), scroll > 0 && up_fits, "{at}: {top}");
+        assert_eq!(
+            low.contains("↓ more"),
+            scroll < max && down_fits,
+            "{at}: {low}"
+        );
+        if up_fits {
+            assert!(top.starts_with("╭ Job details ─"), "{at}: {top}");
+        }
+
+        // Never blank rows below the end while lines above are hidden.
+        let inner = card(JOB_DETAILS, false).inner(area);
+        if scroll > 0 && scroll == max && !inner.is_empty() {
+            let last = text_between(&buf, inner.bottom() - 1, inner.x, inner.right());
+            assert!(!last.trim().is_empty(), "{at}");
+        }
+    }
+
+    #[test]
+    fn the_details_card_keeps_its_corners_at_every_size() {
+        let mut bottom = jobs_after_j(0, 80, 20);
+        bottom.job_scroll = usize::MAX;
+        let states = [
+            ("top", jobs_after_j(0, 80, 20)),
+            ("partway", jobs_after_j(2, 60, 20)),
+            ("bottom", bottom),
+        ];
+        std::thread::scope(|scope| {
+            for (name, app) in &states {
+                scope.spawn(move || {
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            check_job_card(app, name, width, height);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn the_jobs_footer_shows_j_k_scroll() {
+        let app = jobs_after_j(0, 80, 24);
+        let footer = |app: &App, width: u16| {
+            screen(app, width, 24)
+                .lines()
+                .last()
+                .expect("screen has rows")
+                .to_owned()
+        };
+        let full = footer(&app, 80);
+        assert_eq!(
+            full.trim(),
+            "j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll"
+        );
+        // The Jobs footer before `J/K scroll`. At every narrower width the
+        // footer starts with exactly what that one showed there.
+        let before = " j/k move  s save  e easy apply  tab next  1-5 tabs  q quit ";
+        for width in 1..80 {
+            let shown: String = before.chars().take(usize::from(width)).collect();
+            let row = footer(&app, width);
+            assert!(
+                row.starts_with(shown.trim_end()),
+                "{width} columns: {row:?}"
+            );
+            // Cut on the right, as every hint set is.
+            let cut: String = full.chars().take(usize::from(width)).collect();
+            assert_eq!(row, cut, "{width} columns");
+        }
+        for tab in ['1', '2', '4', '5'] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(tab));
+            assert!(!footer(&app, 80).contains("J/K"), "tab {tab}");
+        }
+    }
+
+    #[test]
+    fn the_job_scroll_leaves_other_tabs_alone() {
+        for tab in ['1', '2', '4', '5'] {
+            let mut fresh = App::new();
+            press(&mut fresh, KeyCode::Char(tab));
+            let mut scrolled = jobs_after_j(3, 60, 20);
+            assert_eq!(scrolled.job_scroll, 3);
+            press(&mut scrolled, KeyCode::Char(tab));
+            for (width, height) in [(120, 30), (80, 20), (60, 20)] {
+                assert_eq!(
+                    screen(&scrolled, width, height),
+                    screen(&fresh, width, height),
+                    "tab {tab} at {width}x{height}"
+                );
+            }
+        }
     }
 
     #[test]

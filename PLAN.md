@@ -139,7 +139,12 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   (white on blue) until the next key press. Every hint set fits on one line at
   80 columns. There are eleven sets: Home, post view, comment box, composer,
   My Network, Jobs, Messaging list, reply box, Notifications, search and the
-  Send picker.
+  Send picker. Jobs reads
+  `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
+  (72 columns with the padding). A narrower terminal cuts every set on the
+  right. `J/K scroll` comes last so that a Jobs footer narrower than 72
+  columns shows what it did before the details could scroll: everything up
+  to `q quit` from 60 columns, cut in the same place below that.
 - **Selection:** the selected list row has a blue `▌` bar and a highlighted
   background. The selected feed card and the focused box have a light blue
   border. Lists scroll only once the selection would fall off the bottom.
@@ -322,6 +327,28 @@ A "Jobs for you" list (40%) and "Job details" (60%).
 - **Details:** title, company, `location · workplace`, `Posted Nd ago · N
   applicants`, then `Easy Apply` (or a green `✔ Applied`) and `☆ Save` (or
   `★ Saved`), then "About the job" and the description.
+- **Scrolling the details:** on a short terminal the card doesn't hold the
+  whole description (at 80×20, 4 of the 6 seed jobs; at 60×20, all 6). `J`
+  and `K` scroll the whole card, header lines included, one line at a time,
+  without moving the list. It stops at the top, and at the bottom once the
+  last line of the description is on the card's last row, so it never shows
+  blank rows below the end while lines above are hidden. When everything
+  fits it shows from the top and `J`/`K` change nothing visible.
+  - **Indicators:** while lines are hidden below, the bottom border ends in
+    a light blue ` ↓ more ` just left of the `╯`. While lines are hidden
+    above, the top border ends in ` ↑ more ` just left of the `╮`, with
+    ` Job details ` still on the left. Each goes in only when it fits whole
+    between the corners, and ` ↑ more ` only with at least one `─` between
+    it and the whole title (from a 24-column card, a 40-column terminal;
+    ` ↓ more ` needs a 10-column card, a 16-column terminal), so a narrow
+    card drops it rather than cutting it or the title. A card
+    one row high has its top and bottom border on the same row and gets
+    neither.
+  - **Reset:** the card goes back to the top whenever `j`/`k`/`↓`/`↑` move
+    to another job, and on every search jump to a job, even to the one
+    already selected. `j` on the last job and `k` on the first don't change
+    `job_sel`, so they keep it. Switching tabs and coming back, `/` then
+    Esc, and `s` and `e` keep it, like every other selection.
 
 ### Messaging
 
@@ -500,6 +527,8 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 | `tab: Tab` | `Home`, `Network`, `Jobs`, `Messaging`, `Notifications` |
 | `mode: Mode` | `Browse`, `PostDetail { comment }`, `CommentBox { comment }`, `Composer`, `Reply` |
 | `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs |
+| `job_scroll` | lines of the Jobs details card scrolled off the top, never more than `job_scroll_max`. Back to 0 when `job_sel` changes, kept like a selection otherwise |
+| `job_scroll_max` | how far the selected job's details can scroll on the current screen, set by `fit_job_details` |
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
 | `draft`, `reply`, `comment_draft` | composer, reply box and comment box text |
 | `search: Option<Search>` | `Some { query, selected }` while search is open. `selected` indexes `App::search_hits` |
@@ -508,7 +537,25 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 | `should_quit` | checked by the event loop in `main.rs` |
 
 `App` does no I/O. `App::new()` seeds it from `data.rs`, and
-`App::on_key(KeyEvent)` is the only way it changes.
+`App::on_key(KeyEvent)` is the only way it changes, apart from
+`App::fit_job_details(max)` (below).
+
+- **The job details scroll is clamped where it is stored.** If `App` kept an
+  unclamped offset and `draw` clamped it, `J` past the end would bank
+  presses that `K` then had to pay back before the text moved. But only the
+  event loop knows the screen size, and only the layout in `ui.rs` knows
+  how many rows the details take. So `ui::job_scroll_max(&App, Size)`, a
+  pure function built on the same `screen_areas`, `jobs_areas`, `card` and
+  `job_detail_lines` that `render_jobs` uses, measures the lines that don't
+  fit, and `main.rs` hands that to `App::fit_job_details(max)` before every
+  frame (so before every key, and after every resize). It stores `max` in
+  `job_scroll_max` and pulls `job_scroll` down to it, so a terminal that
+  grew is accounted for before the next key. `J` adds one up to
+  `job_scroll_max`, `K` takes one off down to 0, so every key that can move
+  the text does. `draw` still takes `&App`: it clamps `job_scroll` again
+  against what fits in the frame it is drawing, which keeps a frame drawn
+  before the app has heard of a resize free of blank rows too. In the real
+  loop the two agree.
 
 - **Derived counts:** badges (`App::badge`) and saved jobs
   (`App::saved_jobs`) are computed when asked, never stored.
@@ -632,20 +679,23 @@ Per tab:
 | My Network | `c` | on a suggestion, Connect ↔ Pending: "Invitation sent" / "Invitation withdrawn" |
 | Jobs | `s` | save / unsave: "Job saved" / "Job unsaved" |
 | Jobs | `e` | Easy Apply: "Application sent", then "Already applied" with no change |
+| Jobs | `J` / `K` | scroll the details down / up one line (Shift-j / Shift-k), stopping at the top and where the description ends on the last row |
 | Messaging | `Enter` | open the selected conversation, mark it read, focus the reply box |
 
 `a`/`x` on a suggestion and `c` on an invitation do nothing, not even a
-toast. `s` does nothing on My Network, Messaging and Notifications. Opening Notifications by any route marks them all read.
+toast. `s` does nothing on My Network, Messaging and Notifications. `J` and
+`K` do nothing off Jobs, including in the post view. Opening Notifications by any route marks them all read.
 
-**Composer:** every printable key, including `q`, `j`, `k`, `l`, `1`-`5`,
-`a`, `x`, `c`, `s` and `e`, is typed. `Backspace` deletes. `Enter` publishes
+**Composer:** every printable key, including `q`, `j`, `k`, `J`, `K`, `l`,
+`1`-`5`, `a`, `x`, `c`, `s` and `e`, is typed. `Backspace` deletes. `Enter` publishes
 and toasts "Post published", or toasts "Write something first" and stays open
 when the draft is empty or only whitespace. `Esc` discards the draft. `Tab`
 does nothing.
 
 **Search:** a text box like the composer. Every printable key without Ctrl
-or Alt is typed, including `q`, `j`, `k`, `l`, `p`, `a`, `x`, `c`, `s`, `e`,
-`/` and `1`-`5`, and does nothing else. `Backspace` deletes, and does nothing
+or Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `p`, `a`, `x`, `c`,
+`s`, `e`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
+scroll). `Backspace` deletes, and does nothing
 on an empty query (search stays open). `↓`/`↑` move through the results,
 stopping at both ends. Any change to the query selects the first result
 again. `Enter` closes search and goes to the selected result, switching tabs
@@ -666,8 +716,8 @@ search open with the query. `Esc` closes it and discards the query. `Tab`,
 quits).
 
 **Comment box:** a text box like search. Every printable key without Ctrl or
-Alt is typed, including `q`, `j`, `k`, `l`, `c`, `x`, `p`, `/` and `1`-`5`, and
-does nothing else (no quit, comment move, like, delete, composer, search or
+Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `/` and
+`1`-`5`, and does nothing else (no quit, comment move, like, delete, composer, search or
 tab switch). `Backspace` deletes, and does nothing on an empty draft (the box
 keeps focus). `Enter` posts the comment, selects it and toasts "Comment
 posted", or toasts "Write something first" and keeps the box focused, with
@@ -677,8 +727,8 @@ selected. `Tab`, `BackTab`, the arrows and every Ctrl- or Alt-modified key do
 nothing (Ctrl-C still quits).
 
 **Send picker:** a text box like search. Every printable key without Ctrl
-or Alt is typed into the filter, including `q`, `j`, `k`, `l`, `c`, `x`, `p`,
-`s`, `/` and `1`-`5`, and does nothing else (no quit, tab switch, move, like,
+or Alt is typed into the filter, including `q`, `j`, `k`, `J`, `K`, `l`, `c`,
+`x`, `p`, `s`, `/` and `1`-`5`, and does nothing else (no quit, tab switch, move, like,
 comment box, delete, composer or search). `Backspace` deletes, and does
 nothing on an empty filter (the picker stays open). `↓`/`↑` move through the
 recipients, stopping at both ends, and any change to the filter selects the
@@ -688,7 +738,7 @@ matches" and keeps the picker open with the filter as typed. `Esc` closes it
 and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key
 do nothing (Ctrl-C still quits).
 
-**Reply box:** printable keys are typed the same way. `Enter` appends the
+**Reply box:** printable keys, `J` and `K` included, are typed the same way. `Enter` appends the
 reply to the thread as yours, clears the box and keeps focus. An empty or
 whitespace-only reply does nothing. `Esc` discards the text and returns focus
 to the list.
@@ -702,6 +752,7 @@ workedin/
   Cargo.lock
   src/
     main.rs     ratatui::init()/restore() plus cursor::Show, the panic hook, the event loop
+                (which fits the job details scroll to the screen before each frame)
     app.rs      state, key handling, badges, search, sending. No rendering, no I/O
     data.rs     seed profile, posts, news, people, jobs, conversations, notifications
     ui.rs       draw(frame, &App): all rendering, pure
@@ -723,11 +774,19 @@ Each time `stty -a` matched its output from before launch, the alternate
 screen was off and the cursor was visible. The injected panic was then
 removed.
 
+After the job details learned to scroll, the binary was run in an 80×20
+private tmux session: `3`, then `J` until ` ↓ more ` went (two presses, with
+`to a non-engineer.` on the card's last row), two more `J` that changed
+nothing, and a `K` that moved the text at once. Back at the bottom, the
+window was resized to 120×30: the card showed from the top with no
+indicators. After `q`, `stty -a` differed from before launch only in the new
+rows and columns, the alternate screen was off and the cursor was visible.
+
 ## Testing
 
-112 unit tests, run with `cargo test` (about 20 s):
+130 unit tests, run with `cargo test` (about 20 s):
 
-- **`app.rs`** (55), on the seed data:
+- **`app.rs`** (64), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -866,17 +925,39 @@ removed.
     Ines makes her conversation match. After sharing Maren Holt's post to
     Felix with `s`, `shared a post` finds his conversation, and Enter opens
     that conversation.
-- **`ui.rs`** (57), rendering into a `TestBackend`:
+  - Job details scroll, with `fit_job_details` standing in for the event
+    loop and Shift held as a terminal sends it: `J` and `K` move one line
+    and stop at both ends, changing nothing else (selections, tab, mode,
+    jobs, posts, people, drafts, overlays, toast). `K` at the top changes
+    nothing. On Home (feed and post view), My Network, Messaging (list and
+    after closing a thread) and Notifications (also after a second `5`),
+    `J`/`K` change nothing and the Jobs scroll is still there on `3`.
+  - No dead keys: 14 `J` on a 4-line overflow stop at 4, and the first `K`
+    gives 3. After scrolling to 6, a screen that grows to an overflow of 2
+    pulls it to 2 and the first `K` gives 1; an overflow of 0 gives 0 and `J`
+    stays there; shrinking keeps the offset.
+  - `j`, `↓`, `k` and `↑` to another job start it at the top, while `k` on
+    the first job and `j` on the last keep the scroll. A search jump to a
+    job (`lisbon`) starts at the top from another job, from the same job
+    and from Home; a jump to a post leaves the Jobs scroll alone.
+  - The scroll survives `3` → `1` → `3`, `Tab` then `BackTab`, `/` with a
+    query then Esc, and `s`, `s`, `e`, `e` (all four toasts), and `K` still
+    moves it after.
+  - `J` and `K` are typed in search on all five tabs (`JK`, with the
+    snapshot and the scroll unchanged), the composer, the comment box, the
+    Send picker from the feed and the post view, and the reply box.
+- **`ui.rs`** (66), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 20 states:
+  - Every size from 1×1 to 140×40 renders without panicking, for 22 states:
     Home, post view, comment box (empty and with text), post view after
     commenting, composer (empty and with text), My Network (invitation and
-    suggestion selected), Jobs (with and without a toast), Messaging, reply
+    suggestion selected), Jobs (with and without a toast, scrolled two lines,
+    and scrolled past the end so it draws as the bottom at every size), Messaging, reply
     box, Notifications, search (with matches, empty, no match, and over
     the post view), and the Send picker (from the feed, and with `o` over the
     post view). One thread per state.
@@ -901,6 +982,32 @@ removed.
     coming back no `●` is left.
   - The profile card's saved jobs and connections follow the Jobs and My
     Network tabs.
+  - Job details, scrolling with `J` fitted to the screen before every key
+    as `main.rs` does: at 80×20 the Senior Rust Engineer starts at the top
+    with ` ↓ more ` ending the bottom border and no ` ↑ more `, the last row
+    `You have shipped Rust in production, enjoy`. Two `J` put `to a
+    non-engineer.` on the last row inside the card with ` ↑ more ` and a
+    plain bottom border; three more `J` leave the screen identical and the
+    first `K` shows `writing tests, and can explain a tricky bug` last with
+    ` ↓ more ` back. One `J` at 60×20 shows both. At 120×30 no job shows
+    either and `J` leaves the screen identical. Scrolled to the bottom at
+    60×20, the next frame at 120×30 equals the unscrolled one, before and
+    after `fit_job_details`; at 60×23 the end stays on the last row and the
+    first `K` moves the rows down one.
+  - The details card at the top, scrolled two lines and past the end, at
+    every size from 1×1 to 140×40: the corners are always `╭╮╰╯`, ` ↑ more `
+    shows exactly when lines are hidden above and it fits beside the whole
+    title, ` ↓ more ` exactly when lines are hidden below and it fits, a
+    one-row card shows neither, and at the bottom the last row inside is
+    never blank.
+  - The Jobs footer reads exactly
+    `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
+    at 80×24. At every narrower width it is that line cut on the right, and
+    it starts with exactly what the footer without `J/K scroll` showed at
+    that width.
+    No other tab's footer has `J/K`. Home, My Network, Messaging and
+    Notifications render the same at 120×30, 80×20 and 60×20 with the Jobs
+    details scrolled as without.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
   - Each of the eleven hint sets is at most 80 columns, and is what the footer
@@ -1132,6 +1239,24 @@ fails `bold_marks_only_the_match_in_comment_and_message_rows`,
 searching conversation headlines fails
 `authors_headlines_news_and_notifications_dont_match`.
 
+For scrolling the job details, each break was caught and then restored:
+letting `J` go past `job_scroll_max` (clamping only when drawing) fails 3
+(`shift_j_and_k_scroll_the_details_one_line_and_stop_at_the_end`,
+`the_first_k_after_overscrolling_moves_the_text` and
+`the_first_k_after_the_screen_grows_moves_the_text`); not pulling the
+scroll back in `fit_job_details` fails
+`the_first_k_after_the_screen_grows_moves_the_text` and
+`a_terminal_that_grows_shows_no_blank_rows`; not clamping in `render_jobs`
+fails `a_terminal_that_grows_shows_no_blank_rows` and
+`the_details_card_keeps_its_corners_at_every_size`; not resetting on `j`/`k`
+fails `moving_through_the_jobs_starts_each_at_the_top`, and not resetting
+on a search jump fails `a_search_jump_to_a_job_starts_at_the_top`; showing
+` ↑ more ` whatever the width, or with no `─` between it and the title,
+showing ` ↓ more ` whatever the width, or showing either on a one-row card
+fails `the_details_card_keeps_its_corners_at_every_size`; and dropping the
+hint, or putting it second (right after `j/k move`) instead of last, fails
+`the_jobs_footer_shows_j_k_scroll`.
+
 ## Ideas
 
-Repost, scrolling long job descriptions, profile pages, mouse support.
+Repost, profile pages, mouse support.
