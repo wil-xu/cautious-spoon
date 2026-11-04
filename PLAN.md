@@ -15,7 +15,7 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   pages.
 - It responds the way LinkedIn does: liking posts, opening a post with its
   comments, commenting on it and deleting your own comments, sending a post
-  to a conversation, writing a post, accepting or ignoring invitations,
+  to a conversation, reposting it to the top of your feed, writing a post, accepting or ignoring invitations,
   sending connection requests, saving jobs and applying, reading and replying
   to messages, and clearing notifications. `/` searches people, jobs, posts,
   comments and messages and jumps to the result.
@@ -26,8 +26,8 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
 
 - Real LinkedIn data or accounts (would need auth and APIs, and raises privacy
   concerns).
-- Persisting state between runs. Likes, posts, comments, connections, saved
-  jobs and messages reset on restart.
+- Persisting state between runs. Likes, reposts, posts, comments,
+  connections, saved jobs and messages reset on restart.
 - Mouse support.
 
 ## Build & run
@@ -58,7 +58,7 @@ cargo clippy --all-targets -- -D warnings
 Captured from the real binary in a 120×30 tmux pane (re-captured after the
 narrow-header, wide-text and notification changes, and unchanged by them;
 re-captured again after the Send picker, which only added `s send` to the
-footer):
+footer, and after Repost, which only changed the footer again):
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -90,7 +90,7 @@ footer):
                         │ Technical Recruiter at Harborline Talent                       │
                         │ We're hiring! Harborline Logistics is looking for a Site       │
                         ╰────────────────────────────────────────────────────────────────╯
- j/k move  l like  enter open  p post  s send  tab next  1-5 tabs  q quit
+ j/k move  l like  enter open  p post  r repost  s send  1-5 tabs  q quit
 ```
 
 **No emoji, on purpose.** Every glyph is a single-width character:
@@ -141,7 +141,12 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   My Network, Jobs, Messaging list, reply box, Notifications, search and the
   Send picker. Jobs reads
   `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
-  (72 columns with the padding). A narrower terminal cuts every set on the
+  (72 columns with the padding). Home reads
+  `j/k move  l like  enter open  p post  r repost  s send  1-5 tabs  q quit`
+  (74) and the post view
+  `j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit`
+  (79). To make room for `r repost`, Home dropped `tab next` and the post
+  view `1-5 tabs`. Those keys still work there. A narrower terminal cuts every set on the
   right. `J/K scroll` comes last so that a Jobs footer narrower than 72
   columns shows what it did before the details could scroll: everything up
   to `q quit` from 60 columns, cut in the same place below that.
@@ -167,9 +172,48 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   - the author's headline, truncated with `…`,
   - the body, word-wrapped and cut to 3 rows, the last ending in `…more`,
   - `N reactions · M comments` (singular for 1, thousands with commas),
-  - `Like  Comment  Repost  Send`, where Like becomes a blue `Liked`. Like
-    (`l`), Comment (`c` in the post view) and Send (`s`) work. Repost is only
-    a label.
+  - `Like  Comment  Repost  Send`, where Like becomes a blue `Liked` and,
+    once you've reposted the post, Repost becomes a blue `Reposted`, both
+    bold. Like (`l`), Comment (`c` in the post view), Repost (`r`) and Send
+    (`s`) all work.
+- **Reposts:** `r` puts a repost card at the top of the feed. It is the same
+  post shown a second time, not a copy: one dim line,
+  `Jordan Vale reposted this · now` (your profile name; `reposted_line`),
+  then exactly the lines the original's card shows, as the post is now.
+  When the line doesn't fit, your name is cut with `…` like the author
+  line's (`Jorda… reposted this · now`), as long as at least one column of
+  the name shows next to the whole ` reposted this · now`. Narrower than
+  that, the line keeps the whole words that fit and ends in `…`
+  (`Jordan Vale reposted…`, `Jordan Vale…`), never stopping on the lone `·`
+  or partway through a word; only when not even `Jordan…` fits is the first
+  word cut (`Jor…`). A like or a comment on
+  either shows on both, and both say `Reposted`. A post you haven't reposted
+  looks as it always did.
+
+  Captured from the real binary in a 120×30 tmux pane, after `r` on Maren
+  Holt's post (the selection stays on her own card, the second):
+
+  ```
+  ╭────────────────────────────────────────────────────────────────╮
+  │ Jordan Vale reposted this · now                                │
+  │ Maren Holt · 2h                                                │
+  │ Staff Engineer at Quillfeather Systems                         │
+  │ I'm happy to share that our team cut the CI queue from 40      │
+  │ minutes to 6.                                                  │
+  │ No heroics: we cached the dependency build, split the sl …more │
+  │ 342 reactions · 3 comments                                     │
+  │ Like  Comment  Reposted  Send                                  │
+  ╰────────────────────────────────────────────────────────────────╯
+  ╭────────────────────────────────────────────────────────────────╮
+  │ Maren Holt · 2h                                                │
+  │ Staff Engineer at Quillfeather Systems                         │
+  │ I'm happy to share that our team cut the CI queue from 40      │
+  │ minutes to 6.                                                  │
+  │ No heroics: we cached the dependency build, split the sl …more │
+  │ 342 reactions · 3 comments                                     │
+  │ Like  Comment  Reposted  Send                                  │
+  ╰────────────────────────────────────────────────────────────────╯
+  ```
 - **Right, "WorkedIn News"** (`SIDEBAR_WIDTH = 30`): "Top stories", each with
   its age and reader count.
 - **Responsive:** the right sidebar shows only at 100 columns or more, and the
@@ -178,7 +222,8 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   body with newlines kept, the counts and action row, a rule, then the
   comments, oldest first. `j`/`k` select a comment (marked with a blue `┃`).
   A post with no comments says "No comments yet" instead of the `Comments`
-  heading.
+  heading. `Enter` on a repost card opens its original's post view, the same
+  screen as from the original's own card, with no `reposted this` line.
   - **"Add a comment" box:** always at the bottom of the Post card, inside its
     border (`post_detail_areas` splits the card's inside into the comments and
     a 3-row box). It is drawn like the Messaging reply box
@@ -485,8 +530,10 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
 
 ```rust
 struct Profile      { name, headline, connections: u32 }
-struct Post         { author, headline, hours_ago: u32, body: String,
-                      reactions: u32, comments: Vec<Comment>, liked: bool }
+struct Post         { id: PostId, author, headline, hours_ago: u32,
+                      body: String, reactions: u32, comments: Vec<Comment>,
+                      liked: bool }
+struct PostId(u32)
 struct Comment      { author, headline, hours_ago: u32, body: String }
 struct News         { title, hours_ago: u32, readers: u32 }
 struct Person       { name, headline, mutual: u32 }
@@ -510,6 +557,12 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 - **`Notification::unread` drives the badge, and `is_new` drives the `●`.**
   `is_new` is set from `unread` when you enter the tab and cleared when you
   leave it. Both are `false` in the seed except `unread` on three items.
+- **`Post::id` never changes, and is set once, where the post is built.**
+  The `post` helper takes it as its first argument, and `data::posts` hands
+  each seed post the next id as it builds it (0 to 8, in feed order), so no
+  `Post` ever exists with a placeholder id. `App::publish` gives a new post
+  one more than the highest id. Feed cards name their post by id, because
+  publishing inserts at the front of `posts` and shifts every index.
 - **The comment count is `comments.len()`.** Unlike workit, there is no
   separate displayed total, so the card and the post view always agree,
   including right after you comment.
@@ -523,10 +576,11 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 
 | Field | Meaning |
 |---|---|
-| `profile`, `posts`, `news`, `invitations`, `suggestions`, `jobs`, `conversations`, `notifications` | seed data, mutated in place |
+| `profile`, `posts`, `news`, `invitations`, `suggestions`, `jobs`, `conversations`, `notifications` | seed data, mutated in place. `posts` holds every post once, newest first |
+| `feed: Vec<Card>` | the Home feed, top to bottom. A `Card { post: PostId, repost: bool }` is a post's own card or your repost of it. Every post has exactly one own card, in the order of `posts`, and reposts go in between |
 | `tab: Tab` | `Home`, `Network`, `Jobs`, `Messaging`, `Notifications` |
 | `mode: Mode` | `Browse`, `PostDetail { comment }`, `CommentBox { comment }`, `Composer`, `Reply` |
-| `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs |
+| `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs. `post_sel` indexes `feed` |
 | `job_scroll` | lines of the Jobs details card scrolled off the top, never more than `job_scroll_max`. Back to 0 when `job_sel` changes, kept like a selection otherwise |
 | `job_scroll_max` | how far the selected job's details can scroll on the current screen, set by `fit_job_details` |
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
@@ -558,12 +612,33 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   loop the two agree.
 
 - **Derived counts:** badges (`App::badge`) and saved jobs
-  (`App::saved_jobs`) are computed when asked, never stored.
+  (`App::saved_jobs`) are computed when asked, never stored. So is whether a
+  post is reposted (`App::reposted(id)`: is there a repost card for it).
+- **A repost is a card, not a post.** It holds only its original's id, so
+  there is nothing to copy and nothing to go stale: `App::post(id)` finds
+  the post wherever publishing has moved it. `selected_post` (and
+  `selected_post_mut`) go through the selected card to the post behind it,
+  and everything that acts on "the selected post" uses them: `l`, `Enter`,
+  `j`/`k` in the post view, posting and deleting comments, the Send picker's
+  post row and `send_post`. So all of them act on the original from a
+  repost card. With no reposts, `feed[i]` is `posts[i]`'s card, so
+  `post_sel` means what it did before reposts existed.
+- **Reposting** (`repost`, `r` on Home, from the feed or the post view)
+  inserts `Card { post, repost: true }` at index 0 for the selected card's
+  post, adds 1 to `post_sel` so the selection stays on the same card, and
+  toasts "Reposted". `mode` is untouched, so the post view stays open with
+  the same comment selected. If the post already has a repost card, `r`
+  toasts "Already reposted" and changes nothing. A repost card's post is its
+  original, so `r` on it gets that toast too, and a repost is never reposted
+  itself. Your own posts can be reposted. Nothing undoes a repost.
 - **Search results** are never stored either. `App::search_hits(query)`
   recomputes them from the current state each time, as `SearchHit` values
   (`Invitation(i)`, `Suggestion(i)`, `Job(i)`, `Post(i)`,
   `Comment { post, comment }`, `Conversation { chat, message }`) indexing
-  the live lists.
+  the live lists. Posts and comments come from `posts`, not `feed`, so a
+  reposted post and each of its comments are found once, as the original.
+  A jump to either lands on the post's own card (`card_of`), never on a
+  repost.
   The query is trimmed and lowercased (`search_needle`), and a field matches
   when its `to_lowercase()` contains that. Fields: invitation and suggestion
   name and headline; job title, company and location; post author, headline
@@ -606,7 +681,9 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   at age 0 onto the end of the recipient's messages, where the recipient is
   the selected row of the filtered list. The body is `Shared a post by
   <author>: <first line of the body>` (`first_line`, the text before the
-  first newline; a published post has none, so it's the whole post). Then it
+  first newline; a published post has none, so it's the whole post). From a
+  repost card that is the original's author and body, exactly as from the
+  original's card. Then it
   toasts "Post sent". It changes nothing else: not `unread` (so the badge
   stays), the order of the conversations, `chat_sel`, `open_chat`, `reply`,
   the post's reactions, like state or comments, or `post_sel`. Sending the
@@ -620,8 +697,9 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 - **Removing an invitation** keeps `network_sel` and clamps it to the list. The
   next row slides under the cursor, or the cursor moves up when the last row
   goes. An empty list leaves it at 0, where `a`, `x` and `c` do nothing.
-- **Publishing** inserts the post at index 0 and sets `post_sel` to 0. The
-  published body is the draft with surrounding whitespace trimmed.
+- **Publishing** inserts the post at index 0 of `posts`, with a new id, and
+  its card at index 0 of `feed`, and sets `post_sel` to 0. The published body
+  is the draft with surrounding whitespace trimmed.
 - **The comment box** is `Mode::CommentBox { comment }`, where `comment` is
   the comment selected in the post view when you pressed `c`. Esc goes back to
   `PostDetail { comment }`, so the same comment is selected again. `c` clears
@@ -674,6 +752,7 @@ Per tab:
 | Home | `c` | in the post view, focus the "Add a comment" box with an empty draft. In the feed it does nothing |
 | Home | `x` | in the post view, delete the selected comment if it's yours: "Comment deleted". Otherwise, and in the feed, nothing |
 | Home | `s` | open the Send picker for the selected post, from the feed or the post view |
+| Home | `r` | repost the selected post to the top of the feed: "Reposted", the selection stays on the same post (and comment, in the post view). "Already reposted" and no change if it is reposted already, including on its repost card |
 | My Network | `a` | accept the selected invitation: removed, connections +1, "Invitation accepted" |
 | My Network | `x` | ignore it: removed, connections unchanged, "Invitation ignored" |
 | My Network | `c` | on a suggestion, Connect ↔ Pending: "Invitation sent" / "Invitation withdrawn" |
@@ -683,18 +762,20 @@ Per tab:
 | Messaging | `Enter` | open the selected conversation, mark it read, focus the reply box |
 
 `a`/`x` on a suggestion and `c` on an invitation do nothing, not even a
-toast. `s` does nothing on My Network, Messaging and Notifications. `J` and
+toast. `s` does nothing on My Network, Messaging and Notifications. `r` does
+nothing on My Network, Jobs, Messaging and Notifications. On a repost card,
+`l`, `Enter`, `s` and, in its post view, `c` and `x` act on the original. `J` and
 `K` do nothing off Jobs, including in the post view. Opening Notifications by any route marks them all read.
 
 **Composer:** every printable key, including `q`, `j`, `k`, `J`, `K`, `l`,
-`1`-`5`, `a`, `x`, `c`, `s` and `e`, is typed. `Backspace` deletes. `Enter` publishes
+`1`-`5`, `a`, `x`, `c`, `s`, `e` and `r`, is typed. `Backspace` deletes. `Enter` publishes
 and toasts "Post published", or toasts "Write something first" and stays open
 when the draft is empty or only whitespace. `Esc` discards the draft. `Tab`
 does nothing.
 
 **Search:** a text box like the composer. Every printable key without Ctrl
 or Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `p`, `a`, `x`, `c`,
-`s`, `e`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
+`s`, `e`, `r`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
 scroll). `Backspace` deletes, and does nothing
 on an empty query (search stays open). `↓`/`↑` move through the results,
 stopping at both ends. Any change to the query selects the first result
@@ -706,8 +787,8 @@ the way `1`-`5` do (so leaving Notifications ends the visit):
 | invitation `i` | My Network, `network_sel = i` |
 | suggestion `i` | My Network, `network_sel = invitations + i` |
 | job `i` | Jobs, `job_sel = i` |
-| post `i` | Home feed (not the post view), `post_sel = i` |
-| comment `c` of post `p` | Home, `post_sel = p`, the post view with `PostDetail { comment: c }`: the comment is selected and scrolled into view, and `j`/`k` carry on from it. Esc goes back to the feed on post `p` |
+| post `i` | Home feed (not the post view), `post_sel` on post `i`'s own card (`i` itself until you repost) |
+| comment `c` of post `p` | Home, `post_sel` on post `p`'s own card, the post view with `PostDetail { comment: c }`: the comment is selected and scrolled into view, and `j`/`k` carry on from it. Esc goes back to the feed on post `p` |
 | conversation `i` | Messaging, `chat_sel = i`, opened as `Enter` on it opens it: `open_chat = Some(i)`, marked read (the badge drops), reply draft cleared, reply box focused |
 
 `Enter` with no results, or an empty query, toasts "No results" and keeps
@@ -716,9 +797,9 @@ search open with the query. `Esc` closes it and discards the query. `Tab`,
 quits).
 
 **Comment box:** a text box like search. Every printable key without Ctrl or
-Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `/` and
-`1`-`5`, and does nothing else (no quit, comment move, like, delete, composer, search or
-tab switch). `Backspace` deletes, and does nothing on an empty draft (the box
+Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `r`, `/`
+and `1`-`5`, and does nothing else (no quit, comment move, like, delete,
+repost, composer, search or tab switch). `Backspace` deletes, and does nothing on an empty draft (the box
 keeps focus). `Enter` posts the comment, selects it and toasts "Comment
 posted", or toasts "Write something first" and keeps the box focused, with
 the draft as it was, when the draft is empty or only whitespace. `Esc`
@@ -728,8 +809,8 @@ nothing (Ctrl-C still quits).
 
 **Send picker:** a text box like search. Every printable key without Ctrl
 or Alt is typed into the filter, including `q`, `j`, `k`, `J`, `K`, `l`, `c`,
-`x`, `p`, `s`, `/` and `1`-`5`, and does nothing else (no quit, tab switch, move, like,
-comment box, delete, composer or search). `Backspace` deletes, and does
+`x`, `p`, `s`, `r`, `/` and `1`-`5`, and does nothing else (no quit, tab
+switch, move, like, comment box, delete, repost, composer or search). `Backspace` deletes, and does
 nothing on an empty filter (the picker stays open). `↓`/`↑` move through the
 recipients, stopping at both ends, and any change to the filter selects the
 first recipient again. `Enter` sends the post to the selected recipient,
@@ -738,7 +819,7 @@ matches" and keeps the picker open with the filter as typed. `Esc` closes it
 and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key
 do nothing (Ctrl-C still quits).
 
-**Reply box:** printable keys, `J` and `K` included, are typed the same way. `Enter` appends the
+**Reply box:** printable keys, `J`, `K` and `r` included, are typed the same way. `Enter` appends the
 reply to the thread as yours, clears the box and keeps focus. An empty or
 whitespace-only reply does nothing. `Esc` discards the text and returns focus
 to the list.
@@ -782,11 +863,21 @@ window was resized to 120×30: the card showed from the top with no
 indicators. After `q`, `stty -a` differed from before launch only in the new
 rows and columns, the alternate screen was off and the cursor was visible.
 
+After Repost was added, the binary was run in a 120×30 private tmux session:
+`r` on Maren Holt's post put the repost card first, with a gray border,
+while her own card below kept the light blue one, and the footer showed
+"Reposted". `l` made both cards `343 reactions` and `Liked`. `k`, `Enter`,
+`c`, a comment and `Enter` showed `4 comments` in the post view, and after
+`Esc` both cards showed `4 comments`, with the repost card selected.
+Publishing `hello` put it first and the repost below it still showed Maren
+Holt's post. After `q`, `stty -a` matched its output from before launch,
+the alternate screen was off and the cursor was visible.
+
 ## Testing
 
-130 unit tests, run with `cargo test` (about 20 s):
+147 unit tests, run with `cargo test` (about 20 s):
 
-- **`app.rs`** (64), on the seed data:
+- **`app.rs`** (75), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -946,15 +1037,54 @@ rows and columns, the alternate screen was off and the cursor was visible.
   - `J` and `K` are typed in search on all five tabs (`JK`, with the
     snapshot and the scroll unchanged), the composer, the comment box, the
     Send picker from the feed and the post view, and the reply box.
-- **`ui.rs`** (66), rendering into a `TestBackend`:
+  - Reposting from the feed (Tobias Ferreira-Lund's post): a repost card
+    for his post goes first, "Reposted", the selection moves to card 2, his
+    own card, and `posts` doesn't grow. From Maren Holt's post view with the
+    third comment selected: the same comment stays selected, `k` carries on
+    from it, and Esc lands on her own card.
+  - `r` on My Network, Jobs, Messaging and Notifications changes nothing:
+    the snapshot, the feed, every post's reactions, like state and comments,
+    jobs, invitations and connections, and no toast.
+  - A second `r` on the original, on the repost and in the repost's post
+    view each toast "Already reposted" and change nothing else, leaving one
+    repost. Your own published post can be reposted.
+  - From the repost: `l` likes the original (343, liked) and `l` on the
+    original unlikes it. A comment posted from the repost's post view is the
+    original's fourth, selected, and shows in the original's post view too;
+    Esc returns to the repost card. Deleting it from the repost's post view
+    brings back 3 and moves the cursor up. Other posts are untouched.
+  - Reposting Maren Holt's post, publishing `hello`, then reposting Lucia
+    Brandt's gives exactly `+Lucia Brandt, Jordan Vale, +Maren Holt, Maren
+    Holt, …, Lucia Brandt, Wendell Achterberg`, and each repost's id is its
+    original's.
+  - With Felix Abernathy's post reposted, `typo` still gives exactly
+    `Post(6)`, `Comment { post: 6, comment: 0 }` and his conversation. The
+    post jump lands on his own card (7, not the repost), and so does the
+    comment jump from the repost's post view, with `PostDetail { comment: 0 }`.
+  - `s` on a repost, from the feed and from its post view, sends exactly
+    what `s` on Maren Holt's own card sends.
+  - `r` is typed in search on all five tabs and over the post view (query
+    `r`, nothing else changed), the composer, the comment box, the Send
+    picker from the feed and the post view, and the reply box, and never
+    reposts.
+  - Post ids are unique across the 9 seed posts and still after publishing
+    two more.
+  - `assert_feed_matches_posts` checks that `feed` and `posts` agree: every
+    post has exactly one card of its own, those cards come in `posts` order,
+    and every repost card names a post in `posts`, at most one per post. It
+    runs at the end of every repost test (on every app in the ones that
+    build several), after publishing in
+    `reposts_keep_their_original_when_cards_go_in_above`, and in the id test.
+- **`ui.rs`** (72), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 22 states:
-    Home, post view, comment box (empty and with text), post view after
+  - Every size from 1×1 to 140×40 renders without panicking, for 24 states:
+    Home, Home with two reposts around a published post (Maren Holt's
+    repost selected), post view, the post view of a repost, comment box (empty and with text), post view after
     commenting, composer (empty and with text), My Network (invitation and
     suggestion selected), Jobs (with and without a toast, scrolled two lines,
     and scrolled past the end so it draws as the bottom at every size), Messaging, reply
@@ -963,6 +1093,30 @@ rows and columns, the alternate screen was off and the cursor was visible.
     post view). One thread per state.
   - Card counts and `Like` → `Liked`. A published post renders first with
     `now`. The post view shows the full body and comments.
+  - Reposts at 120×30: after `r` on Maren Holt's post the first card is
+    exactly the card in "Reposts" above, row for row, with a dim
+    `reposted this` line and a gray border, and her own card below it is
+    selected, with the same lines and styles and `Reposted` bold light blue
+    on both. At 120×40 Tobias Ferreira-Lund's card, which isn't reposted, has
+    the same cells as without the repost, one card lower. After `l` on the
+    repost, `343 reactions · 3 comments` and `Liked  Comment  Reposted  Send`
+    show twice, and unliking on the original puts both back.
+  - The post view of a repost shows `Reposted`, the original's comments and
+    no `reposted this` line, and equals the original's post view cell for
+    cell. A comment posted there shows `4 comments` in it and twice on the
+    feed, and in the original's post view.
+  - The `reposted this` line needs 35 columns of terminal below 80. With
+    the repost selected it reads exactly `Jordan Vale reposted this · now`
+    at 35, `Jorda… reposted this · now` at 30, `J… reposted this · now` at
+    26, `Jordan Vale reposted…` at 25, `Jordan Vale…` at 24, 20 and 16,
+    `Jordan…` at 12 and `Jor…` at 8. At every width from 6 to 35 the row
+    keeps both borders and is exactly the terminal's width, and inside them
+    it is the whole line, the name cut with the whole rest after it, or
+    whole words ending in `…` (not on the `·`); a cut first word only
+    where `Jordan…` doesn't fit.
+  - My Network, Jobs, Messaging and Notifications render the same at
+    120×30, 80×24 and 60×20 with two reposts and a published post in the
+    feed as with the seed feed.
   - Badges in the header follow every count and disappear at 0.
   - Narrow header: at 80×24, 70×30 and 60×20 the header row starts with the
     logo and ends with the expected compact tabs, with all five numbers and
@@ -1012,7 +1166,7 @@ rows and columns, the alternate screen was off and the cursor was visible.
     `✔ Applied`, unread markers and the reply box.
   - Each of the eleven hint sets is at most 80 columns, and is what the footer
     shows at 80×24. The post view footer reads exactly
-    `j/k comments  l like  c comment  x delete  s send  esc back  1-5 tabs  q quit`
+    `j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit`
     (79 columns with the padding) and the
     comment box's `type write  backspace delete  enter post  esc cancel`.
     Those hints and every comment box label are single width.
@@ -1257,6 +1411,30 @@ fails `the_details_card_keeps_its_corners_at_every_size`; and dropping the
 hint, or putting it second (right after `j/k move`) instead of last, fails
 `the_jobs_footer_shows_j_k_scroll`.
 
+For reposting, each break was caught and then restored: leaving `post_sel`
+alone on `r` (so the selection slides onto the repost) fails 10, including
+`r_reposts_to_the_top_and_keeps_the_selection_in_the_feed`,
+`r_in_the_post_view_keeps_the_post_and_comment`,
+`a_repost_card_shows_the_original_under_one_line` and every test built on
+`every_state`; making `App::reposted` always false fails 6 (including
+`a_post_is_reposted_once`, `liking_either_card_changes_both` and
+`the_post_view_of_a_repost_is_the_originals`); jumping to `post_sel = i`
+instead of the post's own card fails
+`search_finds_a_reposted_post_once_and_lands_on_the_original`; acting on
+`posts[post_sel]` instead of the card's post fails
+`likes_and_comments_from_a_repost_change_the_original` and
+`liking_either_card_changes_both`; treating a `PostId` as an index into
+`posts` fails 6, including
+`reposts_keep_their_original_when_cards_go_in_above` and
+`your_own_post_can_be_reposted`; and cutting the whole `reposted this` line
+instead of the name fails `a_narrow_reposted_line_is_cut_inside_the_card`.
+So does going back to the first version of `reposted_line`, which kept a
+lone `…` and let the border clip the rest (`… reposted t`). Giving every
+published post `PostId(0)` fails 6, including `post_ids_are_unique` and
+`reposts_keep_their_original_when_cards_go_in_above`; publishing a post
+without its card fails 13, including `post_ids_are_unique` (through
+`assert_feed_matches_posts`) and every test built on `every_state`.
+
 ## Ideas
 
-Repost, profile pages, mouse support.
+Profile pages, mouse support.

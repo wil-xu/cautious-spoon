@@ -19,6 +19,7 @@ use ratatui::widgets::Padding;
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
+use crate::app::Card;
 use crate::app::Mode;
 use crate::app::NetworkItem;
 use crate::app::Search;
@@ -487,9 +488,9 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("l", "like"),
             ("c", "comment"),
             ("x", "delete"),
+            ("r", "repost"),
             ("s", "send"),
             ("esc", "back"),
-            ("1-5", "tabs"),
             ("q", "quit"),
         ],
         (Tab::Home, Mode::Browse) => &[
@@ -497,8 +498,8 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             ("l", "like"),
             ("enter", "open"),
             ("p", "post"),
+            ("r", "repost"),
             ("s", "send"),
-            ("tab", "next"),
             ("1-5", "tabs"),
             ("q", "quit"),
         ],
@@ -654,6 +655,29 @@ fn author_line(author: &'static str, hours_ago: u32, width: usize) -> Line<'stat
     ])
 }
 
+/// `Jordan Vale reposted this · now`, dim, over a repost card. When it doesn't
+/// fit, the name is cut like the author line's, as long as one column of it
+/// shows. Narrower than that, the line keeps the whole words that fit and
+/// ends in `…`, so it never stops partway through a word.
+fn reposted_line(name: &'static str, width: usize) -> Line<'static> {
+    let rest = format!(" reposted this · {}", age(0));
+    let line = format!("{name}{rest}");
+    let text = if width_of(&line) <= width {
+        line
+    } else if width >= width_of(&rest) + 2 {
+        // One column of the name and its `…`, then all of the rest.
+        format!("{}{rest}", truncate(name, width - width_of(&rest)))
+    } else {
+        // The longest run of whole words that leaves room for the `…`, not
+        // counting a lone `·`. Without even the first word, cut it instead.
+        line.match_indices(' ')
+            .map(|(i, _)| &line[..i])
+            .rfind(|words| !words.ends_with('·') && width_of(words) < width)
+            .map_or_else(|| truncate(name, width), |words| format!("{words}…"))
+    };
+    Line::styled(text, Style::new().fg(DIM))
+}
+
 fn counts_line(post: &Post) -> Line<'static> {
     let comments = u32::try_from(post.comments.len()).unwrap_or(u32::MAX);
     Line::styled(
@@ -666,14 +690,27 @@ fn counts_line(post: &Post) -> Line<'static> {
     )
 }
 
-fn actions_line(post: &Post) -> Line<'static> {
+/// `Like  Comment  Repost  Send`, where Like becomes `Liked` and Repost
+/// becomes `Reposted`, both bold light blue.
+fn actions_line(post: &Post, reposted: bool) -> Line<'static> {
     let rest = Style::new().fg(Color::Gray);
+    let done = Style::new().fg(LIGHT_BLUE).bold();
     let like = if post.liked {
-        Span::styled("Liked", Style::new().fg(LIGHT_BLUE).bold())
+        Span::styled("Liked", done)
     } else {
         Span::styled("Like", rest)
     };
-    Line::from(vec![like, Span::styled("  Comment  Repost  Send", rest)])
+    let repost = if reposted {
+        Span::styled("Reposted", done)
+    } else {
+        Span::styled("Repost", rest)
+    };
+    Line::from(vec![
+        like,
+        Span::styled("  Comment  ", rest),
+        repost,
+        Span::styled("  Send", rest),
+    ])
 }
 
 /// The body cut to `CARD_BODY_LINES` rows, ending in `…more` when cut.
@@ -687,18 +724,27 @@ fn preview(body: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn card_lines(post: &Post, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![
+/// The lines inside a feed card. A repost card is the original's lines under
+/// one `reposted this` line.
+fn card_lines(app: &App, card: Card, width: usize) -> Vec<Line<'static>> {
+    let Some(post) = app.post(card.post) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if card.repost {
+        lines.push(reposted_line(app.profile.name, width));
+    }
+    lines.extend([
         author_line(post.author, post.hours_ago, width),
         Line::styled(truncate(post.headline, width), Style::new().fg(DIM)),
-    ];
+    ]);
     lines.extend(
         preview(&post.body, width)
             .into_iter()
             .map(|l| Line::styled(l, Style::new().fg(Color::White))),
     );
     lines.push(counts_line(post));
-    lines.push(actions_line(post));
+    lines.push(actions_line(post, app.reposted(post.id)));
     lines
 }
 
@@ -717,7 +763,11 @@ fn render_feed(frame: &mut Frame, app: &App, area: Rect) {
 
     // 2 border columns and 2 padding columns.
     let width = usize_of(feed.width.saturating_sub(4));
-    let cards: Vec<Vec<Line>> = app.posts.iter().map(|p| card_lines(p, width)).collect();
+    let cards: Vec<Vec<Line>> = app
+        .feed
+        .iter()
+        .map(|&c| card_lines(app, c, width))
+        .collect();
     let heights: Vec<usize> = cards.iter().map(|c| c.len() + 2).collect();
     let first = first_visible(&heights, app.post_sel, usize_of(feed.height));
 
@@ -775,7 +825,7 @@ fn render_post_detail(frame: &mut Frame, app: &App, area: Rect, selected: usize)
     );
     lines.push(Line::raw(""));
     lines.push(counts_line(post));
-    lines.push(actions_line(post));
+    lines.push(actions_line(post, app.reposted(post.id)));
     lines.push(Line::styled("─".repeat(width), Style::new().fg(BORDER)));
     if post.comments.is_empty() {
         lines.push(Line::styled("No comments yet", Style::new().fg(DIM)));
@@ -1812,6 +1862,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::buffer::Cell;
     use ratatui::crossterm::event::KeyCode;
     use ratatui::crossterm::event::KeyEvent;
     use ratatui::crossterm::event::KeyModifiers;
@@ -1875,9 +1926,30 @@ mod tests {
         let mut jobs_bottom = jobs_after_j(0, 60, 20);
         // Past the end on every screen, so it draws as the bottom at each size.
         jobs_bottom.job_scroll = usize::MAX;
+        // Maren Holt's and Lucia Brandt's posts reposted around a published
+        // one, with the selection on Maren Holt's repost.
+        let mut reposts = at(&[KeyCode::Char('r'), KeyCode::Char('p')], "hello");
+        press(&mut reposts, KeyCode::Enter);
+        for _ in 0..9 {
+            press(&mut reposts, KeyCode::Char('j'));
+        }
+        press(&mut reposts, KeyCode::Char('r'));
+        for _ in 0..8 {
+            press(&mut reposts, KeyCode::Char('k'));
+        }
+        assert_eq!(reposts.feed.iter().filter(|c| c.repost).count(), 2);
+        assert!(reposts.feed[reposts.post_sel].repost);
         vec![
             ("home", at(&[], "")),
+            ("home reposts", reposts),
             ("detail", at(&[KeyCode::Char('j'), KeyCode::Enter], "")),
+            (
+                "detail repost",
+                at(
+                    &[KeyCode::Char('r'), KeyCode::Char('k'), KeyCode::Enter],
+                    "",
+                ),
+            ),
             ("comment box", comment("A comment in progress")),
             ("comment box empty", comment("")),
             ("detail commented", commented),
@@ -2261,7 +2333,7 @@ mod tests {
         let mut app = post_view(0);
         assert_eq!(
             footer(&app),
-            "j/k comments  l like  c comment  x delete  s send  esc back  1-5 tabs  q quit"
+            "j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit"
         );
         assert!(hints_line(hints(&app)).width() <= 80);
         press(&mut app, KeyCode::Char('c'));
@@ -2410,6 +2482,227 @@ mod tests {
         let s = screen(&app, 120, 30);
         assert!(s.contains("Liked  Comment  Repost  Send"), "{s}");
         assert!(s.contains(&format!("{} reactions", app.posts[0].reactions)));
+    }
+
+    /// Maren Holt's post reposted, at 120×30, as the card above hers.
+    const MAREN_REPOST: [&str; 10] = [
+        "╭────────────────────────────────────────────────────────────────╮",
+        "│ Jordan Vale reposted this · now                                │",
+        "│ Maren Holt · 2h                                                │",
+        "│ Staff Engineer at Quillfeather Systems                         │",
+        "│ I'm happy to share that our team cut the CI queue from 40      │",
+        "│ minutes to 6.                                                  │",
+        "│ No heroics: we cached the dependency build, split the sl …more │",
+        "│ 342 reactions · 3 comments                                     │",
+        "│ Like  Comment  Reposted  Send                                  │",
+        "╰────────────────────────────────────────────────────────────────╯",
+    ];
+
+    /// The cells of rows `ys` in the Home feed column at 120 columns.
+    fn feed_cells(buf: &Buffer, ys: std::ops::Range<u16>) -> Vec<Vec<Cell>> {
+        ys.map(|y| (24..90).map(|x| buf[(x, y)].clone()).collect())
+            .collect()
+    }
+
+    fn reposted(down: usize) -> App {
+        let mut app = App::new();
+        for _ in 0..down {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Reposted"));
+        app
+    }
+
+    #[test]
+    fn a_repost_card_shows_the_original_under_one_line() {
+        let app = reposted(0);
+        let buf = buffer(&app, 120, 30);
+        let rows: Vec<String> = (6..16).map(|y| text_between(&buf, y, 24, 90)).collect();
+        assert_eq!(rows, MAREN_REPOST, "\n{}", screen(&app, 120, 30));
+        assert_eq!(buf[(26, 7)].fg, DIM, "the reposted line is dim");
+        assert_eq!(buf[(26, 7)].modifier, Modifier::empty());
+        assert_eq!(buf[(24, 6)].fg, BORDER, "the repost card isn't selected");
+
+        // Maren Holt's own card is below, selected, with the same lines.
+        assert_eq!(buf[(24, 16)].fg, LIGHT_BLUE, "her card is selected");
+        assert_eq!(text_between(&buf, 16, 24, 90), MAREN_REPOST[0]);
+        assert_eq!(
+            feed_cells(&buf, 17..24)
+                .into_iter()
+                .map(|row| row.into_iter().skip(1).take(64).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            feed_cells(&buf, 8..15)
+                .into_iter()
+                .map(|row| row.into_iter().skip(1).take(64).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            "the original's lines, styles included"
+        );
+        assert_eq!(text_between(&buf, 23, 24, 90), MAREN_REPOST[8]);
+        // `Reposted` is bold light blue on both cards.
+        for y in [14, 23] {
+            for x in 41..49 {
+                let cell = &buf[(x, y)];
+                assert_eq!(cell.fg, LIGHT_BLUE, "{x},{y}");
+                assert!(cell.modifier.contains(Modifier::BOLD), "{x},{y}");
+            }
+        }
+        assert_eq!(app.status, Some("Reposted"));
+        assert!(
+            screen(&app, 120, 30)
+                .lines()
+                .last()
+                .is_some_and(|l| l.contains(" Reposted "))
+        );
+    }
+
+    #[test]
+    fn a_post_you_havent_reposted_renders_as_before() {
+        // Tobias Ferreira-Lund's card, below Maren Holt's, with and without
+        // her repost above it.
+        let before = buffer(&App::new(), 120, 40);
+        let after = buffer(&reposted(0), 120, 40);
+        assert!(text_between(&before, 16, 24, 90).starts_with("│ Tobias Ferreira-Lund · 4h "));
+        assert_eq!(feed_cells(&before, 15..24), feed_cells(&after, 25..34));
+        assert!(text_between(&before, 22, 24, 90).contains("Like  Comment  Repost  Send"));
+    }
+
+    #[test]
+    fn liking_either_card_changes_both() {
+        let mut app = reposted(0);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('l'));
+        let s = screen(&app, 120, 30);
+        assert_eq!(s.matches("343 reactions · 3 comments").count(), 2, "{s}");
+        assert_eq!(
+            s.matches("Liked  Comment  Reposted  Send").count(),
+            2,
+            "{s}"
+        );
+        assert!(!s.contains("342"), "{s}");
+        // Unliking from the original undoes both.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('l'));
+        let s = screen(&app, 120, 30);
+        assert_eq!(s.matches("342 reactions · 3 comments").count(), 2, "{s}");
+        assert_eq!(s.matches("Like  Comment  Reposted  Send").count(), 2, "{s}");
+    }
+
+    #[test]
+    fn the_post_view_of_a_repost_is_the_originals() {
+        let mut app = reposted(0);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Enter);
+        let s = screen(&app, 120, 40);
+        for text in [
+            "Maren Holt · 2h",
+            "342 reactions · 3 comments",
+            "Like  Comment  Reposted  Send",
+            "Comments",
+            "Felix Abernathy · 1h",
+            "Can confirm.",
+            "Hana Sorensen · now",
+        ] {
+            assert!(s.contains(text), "{text:?} in:\n{s}");
+        }
+        assert!(!s.contains("reposted this"), "{s}");
+        let mut original = reposted(0);
+        press(&mut original, KeyCode::Enter);
+        assert_eq!(buffer(&app, 120, 40), buffer(&original, 120, 40));
+
+        // A comment from here is on both cards and in both post views.
+        comment_on(&mut app, "Saw it on my feed");
+        let s = screen(&app, 120, 40);
+        assert!(s.contains("342 reactions · 4 comments"), "{s}");
+        assert!(s.contains("Saw it on my feed"), "{s}");
+        press(&mut app, KeyCode::Esc);
+        let s = screen(&app, 120, 30);
+        assert_eq!(s.matches("342 reactions · 4 comments").count(), 2, "{s}");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert!(screen(&app, 120, 40).contains("Saw it on my feed"));
+    }
+
+    #[test]
+    fn a_narrow_reposted_line_is_cut_inside_the_card() {
+        // With the repost selected, so the feed doesn't scroll past it.
+        let mut app = reposted(0);
+        press(&mut app, KeyCode::Char('k'));
+        // Below 80 columns the feed is the whole width: 4 columns of border
+        // and padding, so the line needs 35.
+        let row = |width: u16| text_between(&buffer(&app, width, 20), 7, 0, width);
+        for (width, want) in [
+            (35, "│ Jordan Vale reposted this · now │"),
+            (30, "│ Jorda… reposted this · now │"),
+            (26, "│ J… reposted this · now │"),
+            (25, "│ Jordan Vale reposted… │"),
+            (24, "│ Jordan Vale…         │"),
+            (20, "│ Jordan Vale…     │"),
+            (16, "│ Jordan Vale… │"),
+            (12, "│ Jordan…  │"),
+            (8, "│ Jor… │"),
+        ] {
+            assert_eq!(row(width), want, "{width}");
+        }
+
+        let whole = "Jordan Vale reposted this · now";
+        let rest = " reposted this · now";
+        for width in 6..=35 {
+            let row = row(width);
+            assert_eq!(width_of(&row), usize_of(width), "{width}: {row:?}");
+            let inside = row
+                .strip_prefix("│ ")
+                .and_then(|r| r.strip_suffix(" │"))
+                .unwrap_or_else(|| panic!("{width}: {row:?} keeps its borders"))
+                .trim_end();
+            let name_cut = inside
+                .strip_suffix(rest)
+                .and_then(|name| name.strip_suffix('…'))
+                .is_some_and(|name| !name.is_empty() && "Jordan Vale".starts_with(name));
+            if inside == whole || name_cut {
+                continue;
+            }
+            let words = inside
+                .strip_suffix('…')
+                .unwrap_or_else(|| panic!("{width}: {inside:?} ends in …"));
+            // Whole words, unless not even the first one fits with its `…`.
+            let first_fits = width_of("Jordan") < usize_of(width) - 4;
+            assert!(
+                if first_fits {
+                    whole.starts_with(words) && whole[words.len()..].starts_with(' ')
+                } else {
+                    "Jordan".starts_with(words)
+                },
+                "{width}: {inside:?} stops partway through a word"
+            );
+            assert!(!words.ends_with('·'), "{width}: {inside:?}");
+        }
+    }
+
+    #[test]
+    fn other_tabs_render_the_same_with_reposts() {
+        let with_reposts = || {
+            let mut app = reposted(0);
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, "hello");
+            press(&mut app, KeyCode::Enter);
+            press(&mut app, KeyCode::Char('r'));
+            assert_eq!(app.feed.iter().filter(|c| c.repost).count(), 2);
+            app
+        };
+        for tab in ['2', '3', '4', '5'] {
+            let mut with = with_reposts();
+            let mut without = App::new();
+            press(&mut with, KeyCode::Char(tab));
+            press(&mut without, KeyCode::Char(tab));
+            for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+                assert_eq!(
+                    buffer(&with, width, height),
+                    buffer(&without, width, height),
+                    "tab {tab} at {width}x{height}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4245,11 +4538,11 @@ mod tests {
         for (app, want) in [
             (
                 &feed,
-                "j/k move  l like  enter open  p post  s send  tab next  1-5 tabs  q quit",
+                "j/k move  l like  enter open  p post  r repost  s send  1-5 tabs  q quit",
             ),
             (
                 &detail,
-                "j/k comments  l like  c comment  x delete  s send  esc back  1-5 tabs  q quit",
+                "j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit",
             ),
             (&picker, "type filter  ↑/↓ move  enter send  esc cancel"),
         ] {

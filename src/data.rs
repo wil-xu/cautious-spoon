@@ -16,8 +16,15 @@ pub(crate) struct Comment {
     pub body: String,
 }
 
+/// A post's identity, which never changes. A feed card names its post by id
+/// rather than by index, because publishing inserts at the front of `posts`
+/// and shifts every index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PostId(pub u32);
+
 #[derive(Debug, Clone)]
 pub(crate) struct Post {
+    pub id: PostId,
     pub author: &'static str,
     pub headline: &'static str,
     pub hours_ago: u32,
@@ -123,6 +130,7 @@ fn c(author: &'static str, headline: &'static str, hours_ago: u32, body: &'stati
 }
 
 fn post(
+    id: PostId,
     author: &'static str,
     headline: &'static str,
     hours_ago: u32,
@@ -131,6 +139,7 @@ fn post(
     comments: Vec<Comment>,
 ) -> Post {
     Post {
+        id,
         author,
         headline,
         hours_ago,
@@ -142,6 +151,13 @@ fn post(
 }
 
 pub(crate) fn posts() -> Vec<Post> {
+    // Each post takes the next id as it is built: 0, 1, 2, … in feed order.
+    let mut next = 0;
+    let mut post = |author, headline, hours_ago, reactions, body, comments| {
+        let id = PostId(next);
+        next += 1;
+        post(id, author, headline, hours_ago, reactions, body, comments)
+    };
     vec![
         post(
             "Maren Holt",

@@ -11,6 +11,7 @@ use crate::data::News;
 use crate::data::Notification;
 use crate::data::Person;
 use crate::data::Post;
+use crate::data::PostId;
 use crate::data::Profile;
 use crate::data::Suggestion;
 
@@ -168,6 +169,16 @@ pub(crate) fn first_line(body: &str) -> &str {
     body.lines().next().unwrap_or("")
 }
 
+/// One card in the Home feed: post `post`, either as itself or as your repost
+/// of it. A repost is a second card for the same post, not a copy, so it always
+/// shows the post as it is now. Cards name their post by id, which publishing
+/// can't shift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Card {
+    pub post: PostId,
+    pub repost: bool,
+}
+
 /// The selected row on My Network, which spans both sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkItem {
@@ -177,7 +188,11 @@ pub(crate) enum NetworkItem {
 
 pub(crate) struct App {
     pub profile: Profile,
+    /// Every post once, newest first. Search goes through these.
     pub posts: Vec<Post>,
+    /// The Home feed, top to bottom: one card per post, in the order of
+    /// `posts`, with your reposts in between.
+    pub feed: Vec<Card>,
     pub news: Vec<News>,
     pub invitations: Vec<Person>,
     pub suggestions: Vec<Suggestion>,
@@ -186,7 +201,7 @@ pub(crate) struct App {
     pub notifications: Vec<Notification>,
     pub tab: Tab,
     pub mode: Mode,
-    /// Index into `posts`.
+    /// Index into `feed`.
     pub post_sel: usize,
     /// Index into invitations followed by suggestions, as one list.
     pub network_sel: usize,
@@ -230,9 +245,18 @@ fn typed(key: KeyEvent) -> Option<char> {
 
 impl App {
     pub(crate) fn new() -> Self {
+        let posts = data::posts();
+        let feed = posts
+            .iter()
+            .map(|p| Card {
+                post: p.id,
+                repost: false,
+            })
+            .collect();
         App {
             profile: data::profile(),
-            posts: data::posts(),
+            posts,
+            feed,
             news: data::news(),
             invitations: data::invitations(),
             suggestions: data::suggestions(),
@@ -283,8 +307,38 @@ impl App {
         self.jobs.iter().filter(|j| j.saved).count()
     }
 
+    /// The post with id `id`, wherever publishing has moved it in `posts`.
+    pub(crate) fn post(&self, id: PostId) -> Option<&Post> {
+        self.posts.iter().find(|p| p.id == id)
+    }
+
+    /// The post behind the selected card: for a repost, the original.
     pub(crate) fn selected_post(&self) -> Option<&Post> {
-        self.posts.get(self.post_sel)
+        self.feed.get(self.post_sel).and_then(|c| self.post(c.post))
+    }
+
+    fn selected_post_mut(&mut self) -> Option<&mut Post> {
+        let id = self.feed.get(self.post_sel)?.post;
+        self.posts.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Whether you've reposted post `id`. Computed from the feed, never stored.
+    pub(crate) fn reposted(&self, id: PostId) -> bool {
+        self.feed.contains(&Card {
+            post: id,
+            repost: true,
+        })
+    }
+
+    /// The feed index of post `posts[i]`'s own card, not a repost of it.
+    fn card_of(&self, i: usize) -> Option<usize> {
+        let id = self.posts.get(i)?.id;
+        self.feed.iter().position(|&c| {
+            c == Card {
+                post: id,
+                repost: false,
+            }
+        })
     }
 
     pub(crate) fn network_item(&self) -> Option<NetworkItem> {
@@ -397,7 +451,7 @@ impl App {
                 step(&mut comment, len, delta);
                 self.mode = Mode::PostDetail { comment };
             }
-            (Tab::Home, _) => step(&mut self.post_sel, self.posts.len(), delta),
+            (Tab::Home, _) => step(&mut self.post_sel, self.feed.len(), delta),
             (Tab::Network, _) => {
                 let len = self.network_len();
                 step(&mut self.network_sel, len, delta);
@@ -495,11 +549,11 @@ impl App {
             }
             SearchHit::Post(i) => {
                 self.set_tab(Tab::Home);
-                self.post_sel = i;
+                self.post_sel = self.card_of(i).unwrap_or(self.post_sel);
             }
             SearchHit::Comment { post, comment } => {
                 self.set_tab(Tab::Home);
-                self.post_sel = post;
+                self.post_sel = self.card_of(post).unwrap_or(self.post_sel);
                 self.mode = Mode::PostDetail { comment };
             }
             SearchHit::Conversation { chat, .. } => {
@@ -516,7 +570,7 @@ impl App {
                 self.send = Some(SendPicker::default());
             }
             KeyCode::Char('l') => {
-                if let Some(post) = self.posts.get_mut(self.post_sel) {
+                if let Some(post) = self.selected_post_mut() {
                     post.liked = !post.liked;
                     if post.liked {
                         post.reactions += 1;
@@ -525,7 +579,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Enter if self.mode == Mode::Browse && !self.posts.is_empty() => {
+            KeyCode::Enter if self.mode == Mode::Browse && self.selected_post().is_some() => {
                 self.mode = Mode::PostDetail { comment: 0 };
             }
             KeyCode::Char('p') if self.mode == Mode::Browse => self.mode = Mode::Composer,
@@ -540,8 +594,27 @@ impl App {
                     self.delete_comment(comment);
                 }
             }
+            KeyCode::Char('r') => self.repost(),
             _ => {}
         }
+    }
+
+    /// Puts a repost card for the selected post at the top of the feed. The
+    /// selection moves down with the card it was on, so the feed and the post
+    /// view stay on the same post. A repost card stands for its original, so
+    /// reposting it reposts the original, and each post is reposted at most
+    /// once.
+    fn repost(&mut self) {
+        let Some(&Card { post, .. }) = self.feed.get(self.post_sel) else {
+            return;
+        };
+        if self.reposted(post) {
+            self.status = Some("Already reposted");
+            return;
+        }
+        self.feed.insert(0, Card { post, repost: true });
+        self.post_sel += 1;
+        self.status = Some("Reposted");
     }
 
     /// The Send picker is a text box, like search: Ctrl- and Alt-modified keys
@@ -570,7 +643,7 @@ impl App {
     /// reply draft.
     fn send_post(&mut self, chat: usize) {
         self.send = None;
-        let Some(post) = self.posts.get(self.post_sel) else {
+        let Some(post) = self.selected_post() else {
             return;
         };
         let body = format!(
@@ -594,14 +667,11 @@ impl App {
     /// the cursor, or the cursor moves up when the last one goes. Anyone
     /// else's comment, or no comment at all, is left alone without a toast.
     fn delete_comment(&mut self, index: usize) {
-        let Some(post) = self.posts.get_mut(self.post_sel) else {
+        let me = self.profile.name;
+        let Some(post) = self.selected_post_mut() else {
             return;
         };
-        if post
-            .comments
-            .get(index)
-            .is_none_or(|c| c.author != self.profile.name)
-        {
+        if post.comments.get(index).is_none_or(|c| c.author != me) {
             return;
         }
         post.comments.remove(index);
@@ -645,14 +715,16 @@ impl App {
             self.status = Some("Write something first");
             return;
         }
-        let Some(post) = self.posts.get_mut(self.post_sel) else {
+        let (author, headline) = (self.profile.name, self.profile.headline);
+        let body = body.to_owned();
+        let Some(post) = self.selected_post_mut() else {
             return;
         };
         post.comments.push(Comment {
-            author: self.profile.name,
-            headline: self.profile.headline,
+            author,
+            headline,
             hours_ago: 0,
-            body: body.to_owned(),
+            body,
         });
         self.mode = Mode::PostDetail {
             comment: post.comments.len() - 1,
@@ -685,9 +757,12 @@ impl App {
             self.status = Some("Write something first");
             return;
         }
+        // One past the highest id, so it can't be any other post's.
+        let id = PostId(self.posts.iter().map(|p| p.id.0 + 1).max().unwrap_or(0));
         self.posts.insert(
             0,
             Post {
+                id,
                 author: self.profile.name,
                 headline: self.profile.headline,
                 hours_ago: 0,
@@ -695,6 +770,13 @@ impl App {
                 reactions: 0,
                 comments: Vec::new(),
                 liked: false,
+            },
+        );
+        self.feed.insert(
+            0,
+            Card {
+                post: id,
+                repost: false,
             },
         );
         self.draft.clear();
@@ -3027,5 +3109,458 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         type_jk(&mut app);
         assert_eq!((app.reply.as_str(), app.mode), ("JK", Mode::Reply));
+    }
+
+    /// The author of the post behind each feed card, `+` marking a repost.
+    fn feed_authors(app: &App) -> Vec<String> {
+        app.feed
+            .iter()
+            .map(|card| {
+                let author = app.post(card.post).expect("every card has its post").author;
+                format!("{}{author}", if card.repost { "+" } else { "" })
+            })
+            .collect()
+    }
+
+    /// Everything that `r` must leave alone when it does nothing.
+    fn unreposted(app: &App) -> (Snapshot, Vec<Card>, Vec<(u32, bool, usize)>) {
+        (
+            snapshot(app),
+            app.feed.clone(),
+            app.posts
+                .iter()
+                .map(|p| (p.reactions, p.liked, p.comments.len()))
+                .collect(),
+        )
+    }
+
+    fn select_card(app: &mut App, author: &str, repost: bool) {
+        let i = app
+            .feed
+            .iter()
+            .position(|c| c.repost == repost && app.post(c.post).map(|p| p.author) == Some(author))
+            .unwrap_or_else(|| panic!("{author} is in the feed: {:?}", feed_authors(app)));
+        while app.post_sel > i {
+            press(app, KeyCode::Char('k'));
+        }
+        while app.post_sel < i {
+            press(app, KeyCode::Char('j'));
+        }
+    }
+
+    /// What keeps `feed` and `posts` in step: every post has exactly one card
+    /// of its own, those cards come in `posts` order, and every repost card
+    /// names a post in `posts`, at most one repost card per post.
+    fn assert_feed_matches_posts(app: &App) {
+        let own: Vec<PostId> = app
+            .feed
+            .iter()
+            .filter(|c| !c.repost)
+            .map(|c| c.post)
+            .collect();
+        let ids: Vec<PostId> = app.posts.iter().map(|p| p.id).collect();
+        assert_eq!(own, ids, "one own card per post, in order");
+        let mut reposts: Vec<PostId> = Vec::new();
+        for card in app.feed.iter().filter(|c| c.repost) {
+            assert!(ids.contains(&card.post), "{card:?} names a post");
+            assert!(!reposts.contains(&card.post), "{card:?} is the only repost");
+            reposts.push(card.post);
+        }
+    }
+
+    #[test]
+    fn post_ids_are_unique() {
+        let unique = |app: &App| {
+            let ids: Vec<PostId> = app.posts.iter().map(|p| p.id).collect();
+            for (i, id) in ids.iter().enumerate() {
+                assert!(!ids[..i].contains(id), "{id:?} twice in {ids:?}");
+            }
+            ids.len()
+        };
+        let mut app = App::new();
+        assert_eq!(unique(&app), 9);
+        for body in ["hello", "hello again"] {
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, body);
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(app.status, Some("Post published"));
+        }
+        assert_eq!(unique(&app), 11);
+        assert_eq!(app.posts[0].body, "hello again");
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn r_reposts_to_the_top_and_keeps_the_selection_in_the_feed() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        let posts = app.posts.len();
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Reposted"));
+        assert_eq!(
+            app.feed[0],
+            Card {
+                post: app.posts[1].id,
+                repost: true
+            }
+        );
+        assert_eq!(
+            &feed_authors(&app)[..3],
+            [
+                "+Tobias Ferreira-Lund",
+                "Maren Holt",
+                "Tobias Ferreira-Lund"
+            ]
+        );
+        // The same post, one card lower, and still its own card.
+        assert_eq!((app.mode, app.post_sel), (Mode::Browse, 2));
+        assert!(!app.feed[app.post_sel].repost);
+        assert_eq!(
+            app.selected_post().map(|p| p.author),
+            Some("Tobias Ferreira-Lund")
+        );
+        assert_eq!(app.posts.len(), posts, "a repost is not a new post");
+        assert!(app.reposted(app.posts[1].id));
+        assert!(!app.reposted(app.posts[0].id));
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn r_in_the_post_view_keeps_the_post_and_comment() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Reposted"));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        assert_eq!(app.post_sel, 1);
+        assert_eq!(app.selected_post().map(|p| p.author), Some("Maren Holt"));
+        assert_eq!(&feed_authors(&app)[..2], ["+Maren Holt", "Maren Holt"]);
+        // `k` carries on from the same comment, and Esc lands on the original.
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
+        press(&mut app, KeyCode::Esc);
+        assert_eq!((app.mode, app.post_sel), (Mode::Browse, 1));
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn r_does_nothing_on_other_tabs() {
+        for tab in ['2', '3', '4', '5'] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(tab));
+            let before = unreposted(&app);
+            let jobs: Vec<(bool, bool)> = app.jobs.iter().map(|j| (j.saved, j.applied)).collect();
+            let people = (app.invitations.len(), app.profile.connections);
+            press(&mut app, KeyCode::Char('r'));
+            assert_eq!(unreposted(&app), before, "r on {tab}");
+            assert_eq!(app.status, None, "r on {tab}");
+            assert_eq!(
+                app.jobs
+                    .iter()
+                    .map(|j| (j.saved, j.applied))
+                    .collect::<Vec<_>>(),
+                jobs
+            );
+            assert_eq!((app.invitations.len(), app.profile.connections), people);
+            assert_eq!(app.job_scroll, 0);
+            assert_feed_matches_posts(&app);
+        }
+    }
+
+    #[test]
+    fn a_post_is_reposted_once() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('r'));
+        let before = unreposted(&app);
+        // Again on the original.
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Already reposted"));
+        assert_eq!(unreposted(&app), before);
+        // On the repost, which stands for the original.
+        press(&mut app, KeyCode::Char('k'));
+        let before = unreposted(&app);
+        assert_eq!(app.post_sel, 0);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Already reposted"));
+        assert_eq!(unreposted(&app), before);
+        // And from the repost's post view.
+        press(&mut app, KeyCode::Enter);
+        let before = unreposted(&app);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Already reposted"));
+        assert_eq!(unreposted(&app), before);
+        assert_eq!(app.feed.iter().filter(|c| c.repost).count(), 1);
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn your_own_post_can_be_reposted() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "hello");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Reposted"));
+        assert_eq!(
+            &feed_authors(&app)[..3],
+            ["+Jordan Vale", "Jordan Vale", "Maren Holt"]
+        );
+        assert_eq!(app.post_sel, 1);
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn likes_and_comments_from_a_repost_change_the_original() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Char('k'));
+        assert!(app.feed[app.post_sel].repost);
+
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!((app.posts[0].reactions, app.posts[0].liked), (343, true));
+        // Unliking from the original undoes it.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!((app.posts[0].reactions, app.posts[0].liked), (342, false));
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('k'));
+
+        // Comment from the repost's post view.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "From the repost");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Comment posted"));
+        assert_eq!(app.posts[0].comments.len(), 4);
+        assert_eq!(app.posts[0].comments[3].body, "From the repost");
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+        assert_eq!(app.selected_post().map(|p| p.comments.len()), Some(4));
+        // The original's post view has it too.
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            (app.mode, app.post_sel),
+            (Mode::Browse, 0),
+            "back on the repost"
+        );
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.selected_post().map(|p| p.comments.len()), Some(4));
+        press(&mut app, KeyCode::Esc);
+
+        // Delete it from the repost's post view.
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.status, Some("Comment deleted"));
+        assert_eq!(app.posts[0].comments.len(), 3);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+        // Nothing else moved: still one repost, still liked.
+        assert_eq!((app.posts[0].reactions, app.posts[0].liked), (343, true));
+        assert_eq!(&feed_authors(&app)[..2], ["+Maren Holt", "Maren Holt"]);
+        assert_eq!(
+            app.posts
+                .iter()
+                .skip(1)
+                .map(|p| p.comments.len())
+                .collect::<Vec<_>>(),
+            App::new()
+                .posts
+                .iter()
+                .skip(1)
+                .map(|p| p.comments.len())
+                .collect::<Vec<_>>()
+        );
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn reposts_keep_their_original_when_cards_go_in_above() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "hello");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.post_sel, 0);
+        assert_feed_matches_posts(&app);
+        select_card(&mut app, "Lucia Brandt", false);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.status, Some("Reposted"));
+        assert_eq!(app.selected_post().map(|p| p.author), Some("Lucia Brandt"));
+        assert!(!app.feed[app.post_sel].repost);
+        assert_eq!(
+            feed_authors(&app),
+            [
+                "+Lucia Brandt",
+                "Jordan Vale",
+                "+Maren Holt",
+                "Maren Holt",
+                "Tobias Ferreira-Lund",
+                "Ines Okonkwo",
+                "Casey Lindqvist",
+                "Ravi Tenorio",
+                "Hana Sorensen",
+                "Felix Abernathy",
+                "Lucia Brandt",
+                "Wendell Achterberg",
+            ]
+        );
+        // Each repost is the very post, not one at the index it once had.
+        let id = |author: &str| app.posts.iter().find(|p| p.author == author).map(|p| p.id);
+        assert_eq!(Some(app.feed[0].post), id("Lucia Brandt"));
+        assert_eq!(Some(app.feed[2].post), id("Maren Holt"));
+        assert!(app.reposted(app.feed[3].post) && !app.reposted(app.feed[1].post));
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn search_finds_a_reposted_post_once_and_lands_on_the_original() {
+        let mut app = App::new();
+        select_card(&mut app, "Felix Abernathy", false);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.post_sel, 7);
+        // The original is post 6 still, its card 7.
+        assert_eq!(
+            app.search_hits("typo"),
+            [
+                SearchHit::Post(6),
+                SearchHit::Comment {
+                    post: 6,
+                    comment: 0
+                },
+                SearchHit::Conversation {
+                    chat: 3,
+                    message: Some(2)
+                },
+            ]
+        );
+        assert_eq!(
+            named_hits(&app, "typo"),
+            named(&[
+                ("post", "Felix Abernathy"),
+                ("comment", "Maren Holt on Felix Abernathy"),
+                ("conversation", "Felix Abernathy"),
+            ])
+        );
+
+        // From the top of the feed, the post jump lands on the original card.
+        select_card(&mut app, "Maren Holt", false);
+        jump(&mut app, "typo", 0);
+        assert_eq!(
+            (app.tab, app.mode, app.post_sel),
+            (Tab::Home, Mode::Browse, 7)
+        );
+        assert!(!app.feed[7].repost);
+        assert_eq!(
+            app.selected_post().map(|p| p.author),
+            Some("Felix Abernathy")
+        );
+
+        // So does the comment jump, from the repost's post view.
+        press(&mut app, KeyCode::Char('3'));
+        press(&mut app, KeyCode::Char('1'));
+        select_card(&mut app, "Felix Abernathy", true);
+        press(&mut app, KeyCode::Enter);
+        jump(&mut app, "typo", 1);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        assert_eq!(app.post_sel, 7);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!((app.mode, app.post_sel), (Mode::Browse, 7));
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn s_on_a_repost_sends_the_original() {
+        let send_to_felix = |app: &mut App| {
+            press(app, KeyCode::Char('s'));
+            type_str(app, "felix");
+            press(app, KeyCode::Enter);
+            assert_eq!(app.status, Some("Post sent"));
+            app.conversations[3]
+                .messages
+                .last()
+                .expect("sent")
+                .body
+                .clone()
+        };
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Char('k'));
+        assert!(app.feed[app.post_sel].repost);
+        assert_eq!(send_to_felix(&mut app), MAREN_SHARED);
+        assert_eq!(app.post_sel, 0, "back on the repost");
+        // From the repost's post view too, and the same as from the original.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(send_to_felix(&mut app), MAREN_SHARED);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(send_to_felix(&mut app), MAREN_SHARED);
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn r_is_typed_in_every_text_box() {
+        let reposted = |app: &App| app.feed.iter().any(|c| c.repost);
+
+        for tab in ['1', '2', '3', '4', '5'] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(tab));
+            press(&mut app, KeyCode::Char('/'));
+            let before = unreposted(&app);
+            press(&mut app, KeyCode::Char('r'));
+            assert_eq!(query(&app), Some("r"), "search on {tab}");
+            assert_eq!(unreposted(&app), before, "search on {tab}");
+            assert_eq!(app.status, None);
+            assert_feed_matches_posts(&app);
+        }
+        // Over the post view too.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(query(&app), Some("r"));
+        assert!(!reposted(&app));
+        assert_feed_matches_posts(&app);
+
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!((app.draft.as_str(), app.mode), ("r", Mode::Composer));
+        assert!(!reposted(&app));
+        assert_feed_matches_posts(&app);
+
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.comment_draft, "r");
+        assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
+        assert!(!reposted(&app));
+        assert_feed_matches_posts(&app);
+
+        for keys in [&[][..], &[KeyCode::Enter]] {
+            let mut app = App::new();
+            for &key in keys {
+                press(&mut app, key);
+            }
+            press(&mut app, KeyCode::Char('s'));
+            press(&mut app, KeyCode::Char('r'));
+            assert_eq!(filter(&app), Some("r"), "picker after {keys:?}");
+            assert!(!reposted(&app));
+            assert_feed_matches_posts(&app);
+            assert_eq!(app.status, None);
+            assert_feed_matches_posts(&app);
+        }
+
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!((app.reply.as_str(), app.mode), ("r", Mode::Reply));
+        assert!(!reposted(&app));
+        assert_feed_matches_posts(&app);
     }
 }
