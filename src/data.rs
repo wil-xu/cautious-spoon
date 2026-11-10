@@ -56,6 +56,33 @@ pub(crate) struct Suggestion {
     pub pending: bool,
 }
 
+/// One job on a profile's Experience card.
+#[derive(Debug, Clone)]
+pub(crate) struct Role {
+    pub title: &'static str,
+    pub company: &'static str,
+    /// `2021 - present`.
+    pub years: &'static str,
+}
+
+/// Everything a profile page shows about someone other than you that isn't
+/// already elsewhere in the app. Each person has exactly one, and its
+/// headline is the one every post, comment, invitation, suggestion and
+/// conversation shows for that name.
+#[derive(Debug, Clone)]
+pub(crate) struct Member {
+    pub name: &'static str,
+    pub headline: &'static str,
+    pub location: &'static str,
+    pub mutual: u32,
+    pub about: &'static str,
+    /// Newest first. The first is the current role, matching the headline.
+    pub experience: Vec<Role>,
+    /// One of your connections ("1st"), or not ("2nd"). Accepting their
+    /// invitation sets it.
+    pub connected: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Workplace {
     Remote,
@@ -608,6 +635,278 @@ pub(crate) fn notifications() -> Vec<Notification> {
             "Congratulate Casey Lindqvist on 5 years at Pinecrest Studio",
             48,
             false,
+        ),
+    ]
+}
+
+fn role(title: &'static str, company: &'static str, years: &'static str) -> Role {
+    Role {
+        title,
+        company,
+        years,
+    }
+}
+
+fn member(
+    name: &'static str,
+    headline: &'static str,
+    location: &'static str,
+    mutual: u32,
+    connected: bool,
+    about: &'static str,
+    experience: Vec<Role>,
+) -> Member {
+    Member {
+        name,
+        headline,
+        location,
+        mutual,
+        about,
+        experience,
+        connected,
+    }
+}
+
+/// One profile for every post author, invitation, suggestion and
+/// conversation partner. The people who post or message you are your
+/// connections; invitations and suggestions aren't yet.
+pub(crate) fn members() -> Vec<Member> {
+    vec![
+        member(
+            "Maren Holt",
+            "Staff Engineer at Quillfeather Systems",
+            "Lisbon, Portugal",
+            38,
+            true,
+            "I make build systems fast and boring. Fifteen years of backend work, \
+             the last five on Quillfeather's developer platform. Ask me about \
+             caching, flaky tests or sourdough.",
+            vec![
+                role("Staff Engineer", "Quillfeather Systems", "2021 - present"),
+                role(
+                    "Senior Software Engineer",
+                    "Ferngrove Analytics",
+                    "2015 - 2021",
+                ),
+            ],
+        ),
+        member(
+            "Tobias Ferreira-Lund",
+            "Product Manager at Brightkettle",
+            "Copenhagen, Denmark",
+            12,
+            true,
+            "Product manager for Brightkettle's analytics APIs. I write things \
+             down so meetings can be shorter. Before product I was a support \
+             engineer, which explains a lot.",
+            vec![
+                role("Product Manager", "Brightkettle", "2020 - present"),
+                role("Support Engineer", "Copperline Telecom", "2016 - 2020"),
+            ],
+        ),
+        member(
+            "Ines Okonkwo",
+            "Technical Recruiter at Harborline Talent",
+            "Rotterdam, Netherlands",
+            21,
+            true,
+            "I help engineers find teams worth joining, mostly in logistics and \
+             infrastructure. I read every message, and I share the salary range \
+             in the first one.",
+            vec![
+                role("Technical Recruiter", "Harborline Talent", "2022 - present"),
+                role("HR Coordinator", "Saltmarsh Shipping", "2018 - 2022"),
+            ],
+        ),
+        member(
+            "Casey Lindqvist",
+            "Design Lead at Pinecrest Studio",
+            "Austin, TX",
+            17,
+            true,
+            "Design lead at Pinecrest Studio, where I have spent five years making \
+             developer tools feel friendly. Paper sketches first, pixels later.",
+            vec![
+                role("Design Lead", "Pinecrest Studio", "2021 - present"),
+                role("Visual Designer", "Bluefen Games", "2016 - 2021"),
+            ],
+        ),
+        member(
+            "Ravi Tenorio",
+            "Engineering Manager at Quillfeather Systems",
+            "Porto, Portugal",
+            44,
+            true,
+            "Engineering manager for the editor team. A year into managing, still \
+             learning something every week, mostly from the people I work with.",
+            vec![
+                role(
+                    "Engineering Manager",
+                    "Quillfeather Systems",
+                    "2025 - present",
+                ),
+                role(
+                    "Senior Software Engineer",
+                    "Quillfeather Systems",
+                    "2019 - 2025",
+                ),
+            ],
+        ),
+        member(
+            "Hana Sorensen",
+            "Data Scientist at Brightkettle",
+            "Oslo, Norway",
+            9,
+            true,
+            "Data scientist working on churn and forecasting. I check the \
+             baseline before I celebrate, and I like a chart that needs no legend.",
+            vec![
+                role("Data Scientist", "Brightkettle", "2022 - present"),
+                role("Data Analyst", "Driftwood Insurance", "2019 - 2022"),
+            ],
+        ),
+        member(
+            "Felix Abernathy",
+            "Software Engineering Intern at Quillfeather Systems",
+            "Edinburgh, United Kingdom",
+            6,
+            true,
+            "Computer science student on a summer internship. One pull request \
+             merged so far, and a long list of questions in my check-in doc.",
+            vec![
+                role(
+                    "Software Engineering Intern",
+                    "Quillfeather Systems",
+                    "2026 - present",
+                ),
+                role("Teaching Assistant", "Glenmoor College", "2024 - 2026"),
+            ],
+        ),
+        member(
+            "Lucia Brandt",
+            "Workplace Experience Manager at Quillfeather Systems",
+            "Lisbon, Portugal",
+            52,
+            true,
+            "I keep the Lisbon office running: desks, events, and the espresso \
+             machine. If something on floor three is broken, I probably know.",
+            vec![
+                role(
+                    "Workplace Experience Manager",
+                    "Quillfeather Systems",
+                    "2020 - present",
+                ),
+                role("Office Manager", "Ferngrove Analytics", "2014 - 2020"),
+            ],
+        ),
+        member(
+            "Wendell Achterberg",
+            "Founder at Tinderbox Robotics",
+            "Pittsburgh, PA",
+            4,
+            true,
+            "Founder of Tinderbox Robotics. We build warehouse robots that handle \
+             fragile things gently. Previously spent a decade designing grippers.",
+            vec![
+                role("Founder", "Tinderbox Robotics", "2019 - present"),
+                role("Mechanical Engineer", "Ironquill Automation", "2009 - 2019"),
+            ],
+        ),
+        member(
+            "Noor Haddad",
+            "Site Reliability Engineer at Quillfeather Systems",
+            "Berlin, Germany",
+            14,
+            false,
+            "Site reliability engineer. I tune alerts until they mean something \
+             and write runbooks people actually read. Oncall is calmer than it \
+             sounds.",
+            vec![
+                role(
+                    "Site Reliability Engineer",
+                    "Quillfeather Systems",
+                    "2022 - present",
+                ),
+                role("Systems Administrator", "Mossbank Freight", "2017 - 2022"),
+            ],
+        ),
+        member(
+            "Baptiste Moreau",
+            "Frontend Engineer at Brightkettle",
+            "Lyon, France",
+            3,
+            false,
+            "Frontend engineer building Brightkettle's dashboards. I care about \
+             fast pages, keyboard shortcuts and charts that work in dark mode.",
+            vec![
+                role("Frontend Engineer", "Brightkettle", "2023 - present"),
+                role("Web Developer", "Atelier Cerise", "2019 - 2023"),
+            ],
+        ),
+        member(
+            "Yuki Tanabe",
+            "Technical Writer at Harborline Logistics",
+            "Utrecht, Netherlands",
+            7,
+            false,
+            "Technical writer. I turn tribal knowledge into docs, and docs into \
+             fewer support tickets. Short sentences are my favorite feature.",
+            vec![
+                role("Technical Writer", "Harborline Logistics", "2021 - present"),
+                role("Documentation Specialist", "Kumo Press", "2017 - 2021"),
+            ],
+        ),
+        member(
+            "Amara Lindgren",
+            "Security Engineer at Larkspur Labs",
+            "Toronto, Canada",
+            9,
+            false,
+            "Security engineer on Larkspur's build infrastructure. I spend my \
+             days making the secure way the easy way.",
+            vec![
+                role("Security Engineer", "Larkspur Labs", "2022 - present"),
+                role("Penetration Tester", "Redfern Security", "2018 - 2022"),
+            ],
+        ),
+        member(
+            "Theo Vasquez-Hart",
+            "Product Designer at Pinecrest Studio",
+            "San Antonio, TX",
+            5,
+            false,
+            "Product designer at Pinecrest Studio. I prototype in the terminal \
+             before I open a design tool, and I collect good empty states.",
+            vec![
+                role("Product Designer", "Pinecrest Studio", "2023 - present"),
+                role("UX Designer", "Bluefen Games", "2020 - 2023"),
+            ],
+        ),
+        member(
+            "Saoirse Kimura",
+            "Robotics Engineer at Tinderbox Robotics",
+            "Pittsburgh, PA",
+            2,
+            false,
+            "Robotics engineer working on perception for warehouse arms. Part of \
+             the team that taught a robot to stack mugs.",
+            vec![
+                role("Robotics Engineer", "Tinderbox Robotics", "2023 - present"),
+                role("Research Assistant", "Glenmoor College", "2020 - 2023"),
+            ],
+        ),
+        member(
+            "Mateo Achebe",
+            "Developer Advocate at Brightkettle",
+            "Madrid, Spain",
+            11,
+            false,
+            "Developer advocate for Brightkettle's APIs. I write tutorials, build \
+             sample apps and bring what I hear at meetups back to the team.",
+            vec![
+                role("Developer Advocate", "Brightkettle", "2024 - present"),
+                role("Backend Developer", "Copperline Telecom", "2019 - 2024"),
+            ],
         ),
     ]
 }

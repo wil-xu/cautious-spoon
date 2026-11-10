@@ -22,6 +22,8 @@ use crate::app::App;
 use crate::app::Card;
 use crate::app::Mode;
 use crate::app::NetworkItem;
+use crate::app::ProfileAction;
+use crate::app::ProfilePage;
 use crate::app::Search;
 use crate::app::SearchHit;
 use crate::app::SendPicker;
@@ -281,12 +283,14 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
 
     render_header(frame, app, header);
     render_footer(frame, app, footer);
-    match app.tab {
-        Tab::Home => render_home(frame, app, body),
-        Tab::Network => render_network(frame, app, body),
-        Tab::Jobs => render_jobs(frame, app, body),
-        Tab::Messaging => render_messaging(frame, app, body),
-        Tab::Notifications => render_notifications(frame, app, body),
+    match (&app.profile_page, app.tab) {
+        // A profile replaces the body, whichever tab it was opened from.
+        (Some(page), _) => render_profile_page(frame, app, page, body),
+        (None, Tab::Home) => render_home(frame, app, body),
+        (None, Tab::Network) => render_network(frame, app, body),
+        (None, Tab::Jobs) => render_jobs(frame, app, body),
+        (None, Tab::Messaging) => render_messaging(frame, app, body),
+        (None, Tab::Notifications) => render_notifications(frame, app, body),
     }
     if app.mode == Mode::Composer {
         render_composer(frame, app, body);
@@ -446,10 +450,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Key hints for the current tab and mode. Each set fits on one line at 80
-/// columns.
-fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
+/// columns. The post view's and a profile's name only the keys that do
+/// something in the current state.
+fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.search.is_some() {
-        return &[
+        return vec![
             ("type", "search"),
             ("↑/↓", "move"),
             ("enter", "open"),
@@ -457,62 +462,59 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
         ];
     }
     if app.send.is_some() {
-        return &[
+        return vec![
             ("type", "filter"),
             ("↑/↓", "move"),
             ("enter", "send"),
             ("esc", "cancel"),
         ];
     }
+    if let Some(page) = &app.profile_page {
+        return profile_hints(app, page);
+    }
     match (app.tab, app.mode) {
-        (_, Mode::Composer) => &[
+        (_, Mode::Composer) => vec![
             ("type", "write"),
             ("backspace", "delete"),
             ("enter", "publish"),
             ("esc", "discard"),
         ],
-        (_, Mode::Reply) => &[
+        (_, Mode::Reply) => vec![
             ("type", "write"),
             ("backspace", "delete"),
             ("enter", "send"),
             ("esc", "back to list"),
         ],
-        (_, Mode::CommentBox { .. }) => &[
+        (_, Mode::CommentBox { .. }) => vec![
             ("type", "write"),
             ("backspace", "delete"),
             ("enter", "post"),
             ("esc", "cancel"),
         ],
-        (_, Mode::PostDetail { .. }) => &[
-            ("j/k", "comments"),
-            ("l", "like"),
-            ("c", "comment"),
-            ("x", "delete"),
-            ("r", "repost"),
-            ("s", "send"),
-            ("esc", "back"),
-            ("q", "quit"),
-        ],
-        (Tab::Home, Mode::Browse) => &[
+        (_, Mode::PostDetail { comment }) => post_view_hints(app, comment),
+        // `1-5 tabs` made room for `v profile`, as `tab next` did for
+        // `r repost`. Both keys still work.
+        (Tab::Home, Mode::Browse) => vec![
             ("j/k", "move"),
             ("l", "like"),
             ("enter", "open"),
             ("p", "post"),
             ("r", "repost"),
             ("s", "send"),
-            ("1-5", "tabs"),
+            ("v", "profile"),
             ("q", "quit"),
         ],
-        (Tab::Network, Mode::Browse) => &[
+        (Tab::Network, Mode::Browse) => vec![
             ("j/k", "move"),
             ("a", "accept"),
             ("x", "ignore"),
             ("c", "connect"),
+            ("v", "profile"),
             ("tab", "next"),
             ("1-5", "tabs"),
             ("q", "quit"),
         ],
-        (Tab::Jobs, Mode::Browse) => &[
+        (Tab::Jobs, Mode::Browse) => vec![
             ("j/k", "move"),
             ("s", "save"),
             ("e", "easy apply"),
@@ -523,20 +525,70 @@ fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
             // did before the details could scroll.
             ("J/K", "scroll"),
         ],
-        (Tab::Messaging, Mode::Browse) => &[
+        (Tab::Messaging, Mode::Browse) => vec![
             ("j/k", "move"),
             ("enter", "open"),
+            ("v", "profile"),
             ("tab", "next"),
             ("1-5", "tabs"),
             ("q", "quit"),
         ],
-        (Tab::Notifications, Mode::Browse) => &[
+        (Tab::Notifications, Mode::Browse) => vec![
             ("j/k", "move"),
             ("tab", "next"),
             ("1-5", "tabs"),
             ("q", "quit"),
         ],
     }
+}
+
+/// The post view's hints. `j/k comments` only when there are comments to
+/// move between, and `x delete` only when the selected comment is yours, in
+/// place of `r repost`: the footer has room for one of them next to
+/// `v profile`, and Repost is still spelled out on the card's action row.
+fn post_view_hints(app: &App, comment: usize) -> Vec<(&'static str, &'static str)> {
+    let comments = app.selected_post().map_or(0, |p| p.comments.len());
+    let mut hints = Vec::new();
+    if comments >= 2 {
+        hints.push(("j/k", "comments"));
+    }
+    hints.extend([("l", "like"), ("c", "comment")]);
+    hints.push(if app.is_yours(comment) {
+        ("x", "delete")
+    } else {
+        ("r", "repost")
+    });
+    hints.extend([
+        ("s", "send"),
+        ("v", "profile"),
+        ("esc", "back"),
+        ("q", "quit"),
+    ]);
+    hints
+}
+
+/// A profile's hints: `j/k posts` only with posts to move between, `enter
+/// open` only with a post to open, then just the action its top card offers.
+fn profile_hints(app: &App, page: &ProfilePage) -> Vec<(&'static str, &'static str)> {
+    let posts = app.activity(page.name).len();
+    let mut hints = Vec::new();
+    if posts >= 2 {
+        hints.push(("j/k", "posts"));
+    }
+    if posts >= 1 {
+        hints.push(("enter", "open"));
+    }
+    match app.profile_action(page.name) {
+        Some(ProfileAction::Invitation(_)) => hints.extend([("a", "accept"), ("x", "ignore")]),
+        Some(ProfileAction::Suggestion(i)) if app.suggestions[i].pending => {
+            hints.push(("c", "withdraw"));
+        }
+        Some(ProfileAction::Suggestion(_)) => hints.push(("c", "connect")),
+        Some(ProfileAction::Message(_)) => hints.push(("m", "message")),
+        None => {}
+    }
+    hints.extend([("esc", "back"), ("1-5", "tabs"), ("q", "quit")]);
+    hints
 }
 
 fn hints_line(hints: &[(&'static str, &'static str)]) -> Line<'static> {
@@ -558,7 +610,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             format!(" {status} "),
             Style::new().fg(Color::White).bg(BLUE).bold(),
         )),
-        None => hints_line(hints(app)),
+        None => hints_line(&hints(app)),
     };
     frame.render_widget(line, area);
 }
@@ -678,16 +730,18 @@ fn reposted_line(name: &'static str, width: usize) -> Line<'static> {
     Line::styled(text, Style::new().fg(DIM))
 }
 
-fn counts_line(post: &Post) -> Line<'static> {
+/// `342 reactions · 3 comments`.
+fn counts_text(post: &Post) -> String {
     let comments = u32::try_from(post.comments.len()).unwrap_or(u32::MAX);
-    Line::styled(
-        format!(
-            "{} · {}",
-            count(post.reactions, "reaction"),
-            count(comments, "comment")
-        ),
-        Style::new().fg(DIM),
+    format!(
+        "{} · {}",
+        count(post.reactions, "reaction"),
+        count(comments, "comment")
     )
+}
+
+fn counts_line(post: &Post) -> Line<'static> {
+    Line::styled(counts_text(post), Style::new().fg(DIM))
 }
 
 /// `Like  Comment  Repost  Send`, where Like becomes `Liked` and Repost
@@ -1442,6 +1496,24 @@ fn render_send(frame: &mut Frame, app: &App, picker: &SendPicker, body: Rect) {
 
 // ---------------------------------------------------------- My Network
 
+/// `Ignore  Accept`, on an invitation's row and on its profile.
+fn invitation_buttons() -> Vec<Span<'static>> {
+    vec![
+        Span::styled("Ignore", Style::new().fg(DIM)),
+        Span::raw("  "),
+        Span::styled(" Accept ", Style::new().fg(Color::White).bg(BLUE).bold()),
+    ]
+}
+
+/// `+ Connect`, or `◷ Pending` once sent, on a suggestion's row and profile.
+fn connect_button(pending: bool) -> Span<'static> {
+    if pending {
+        Span::styled("◷ Pending", Style::new().fg(DIM))
+    } else {
+        Span::styled("+ Connect", Style::new().fg(LIGHT_BLUE).bold())
+    }
+}
+
 fn render_network(frame: &mut Frame, app: &App, area: Rect) {
     let show_side = area.width >= PROFILE_MIN_WIDTH;
     let [left, main] = Layout::horizontal([
@@ -1494,13 +1566,6 @@ fn render_network(frame: &mut Frame, app: &App, area: Rect) {
             inner,
         );
     } else {
-        let buttons = || {
-            vec![
-                Span::styled("Ignore", Style::new().fg(DIM)),
-                Span::raw("  "),
-                Span::styled(" Accept ", Style::new().fg(Color::White).bg(BLUE).bold()),
-            ]
-        };
         let items = app
             .invitations
             .iter()
@@ -1509,7 +1574,7 @@ fn render_network(frame: &mut Frame, app: &App, area: Rect) {
                 vec![
                     spread(
                         vec![Span::styled(name, Style::new().fg(Color::White).bold())],
-                        buttons(),
+                        invitation_buttons(),
                         width,
                     ),
                     Line::styled(
@@ -1530,11 +1595,7 @@ fn render_network(frame: &mut Frame, app: &App, area: Rect) {
         .suggestions
         .iter()
         .map(|s| {
-            let button = if s.pending {
-                Span::styled("◷ Pending", Style::new().fg(DIM))
-            } else {
-                Span::styled("+ Connect", Style::new().fg(LIGHT_BLUE).bold())
-            };
+            let button = connect_button(s.pending);
             let name = truncate(s.person.name, width.saturating_sub(11));
             vec![
                 spread(
@@ -1553,6 +1614,207 @@ fn render_network(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     render_list(frame, inner, items, sug_sel);
+}
+
+// ------------------------------------------------------------- Profile
+
+const ABOUT: &str = " About ";
+const EXPERIENCE: &str = " Experience ";
+const ACTIVITY: &str = " Activity ";
+const NO_RECENT_POSTS: &str = "No recent posts";
+/// The Activity card's border and one post: what it keeps on screen before
+/// the cards above it give way.
+const ACTIVITY_MIN_HEIGHT: usize = 4;
+
+/// What a profile card holds: plain lines, or Activity's posts with the
+/// selected one.
+enum ProfileBody {
+    Lines(Vec<Line<'static>>),
+    Posts(Vec<Vec<Line<'static>>>, usize),
+}
+
+/// One card of a profile page: where it goes, its title, what it holds and
+/// whether it has the selection.
+struct ProfileCard {
+    area: Rect,
+    title: &'static str,
+    body: ProfileBody,
+    selected: bool,
+}
+
+/// The top card's button for `action`, as My Network and Messaging draw it.
+fn action_spans(app: &App, action: ProfileAction) -> Vec<Span<'static>> {
+    match action {
+        ProfileAction::Invitation(_) => invitation_buttons(),
+        ProfileAction::Suggestion(i) => vec![connect_button(
+            app.suggestions.get(i).is_some_and(|s| s.pending),
+        )],
+        ProfileAction::Message(_) => vec![Span::styled(
+            " Message ",
+            Style::new().fg(Color::White).bg(BLUE).bold(),
+        )],
+    }
+}
+
+/// The top card: `name · 1st` with the action on the right when it all fits
+/// (on a row of its own otherwise), the headline, then the location and
+/// mutual connections, or for you the connection count.
+fn profile_top_lines(app: &App, name: &'static str, width: usize) -> Vec<Line<'static>> {
+    let bold = Style::new().fg(Color::White).bold();
+    let dim = Style::new().fg(DIM);
+    let (headline, details) = match app.member(name) {
+        Some(m) => (
+            m.headline,
+            format!("{} · {}", m.location, count(m.mutual, "mutual connection")),
+        ),
+        None => (
+            app.profile.headline,
+            count(app.profile.connections, "connection"),
+        ),
+    };
+    let degree = app
+        .degree(name)
+        .map_or_else(String::new, |d| format!(" · {}", d.label()));
+    let first = if width_of(&degree) < width {
+        vec![
+            Span::styled(truncate(name, width - width_of(&degree)), bold),
+            Span::styled(degree.clone(), dim),
+        ]
+    } else {
+        hit_line(&[(name, bold, false), (&degree, dim, false)], "", width)
+    };
+    let action = app
+        .profile_action(name)
+        .map_or_else(Vec::new, |a| action_spans(app, a));
+    let action_width: usize = action.iter().map(Span::width).sum();
+    let beside = width_of(name) + width_of(&degree) + 2 + action_width <= width;
+
+    let mut lines = Vec::new();
+    if !action.is_empty() && beside {
+        lines.push(spread(first, action.clone(), width));
+    } else {
+        lines.push(Line::from(first));
+    }
+    lines.push(Line::styled(
+        truncate(headline, width),
+        Style::new().fg(Color::Gray),
+    ));
+    lines.push(Line::styled(truncate(&details, width), dim));
+    if !action.is_empty() && !beside {
+        lines.push(Line::from(action));
+    }
+    lines
+}
+
+/// The cards of `page` in the body `area`, top to bottom. The top card is
+/// always first. Below it come About, Experience and Activity (only Activity
+/// on your own profile), and when they don't all fit, About and then
+/// Experience give way, whole, so that Activity keeps room for its selected
+/// post. The last card shown is cut short at the bottom, keeping its border.
+fn profile_cards(app: &App, page: &ProfilePage, area: Rect) -> Vec<ProfileCard> {
+    // 2 border columns and 2 padding columns.
+    let width = usize_of(area.width.saturating_sub(4));
+    let lines = |rows: Vec<String>, style: Style| -> Vec<Line<'static>> {
+        rows.into_iter().map(|l| Line::styled(l, style)).collect()
+    };
+    let mut rest = Vec::new();
+    if let Some(m) = app.member(page.name) {
+        rest.push((
+            ABOUT,
+            ProfileBody::Lines(lines(wrap(m.about, width), Style::new().fg(Color::Gray))),
+            false,
+        ));
+        let mut roles = Vec::new();
+        for role in &m.experience {
+            roles.push(Line::styled(
+                truncate(role.title, width),
+                Style::new().fg(Color::White).bold(),
+            ));
+            roles.push(Line::styled(
+                truncate(&format!("{} · {}", role.company, role.years), width),
+                Style::new().fg(DIM),
+            ));
+        }
+        rest.push((EXPERIENCE, ProfileBody::Lines(roles), false));
+    }
+    let posts = app.activity(page.name);
+    let activity = if posts.is_empty() {
+        ProfileBody::Lines(vec![Line::styled(
+            truncate(NO_RECENT_POSTS, width),
+            Style::new().fg(DIM),
+        )])
+    } else {
+        // One column goes to the selection bar.
+        let width = width.saturating_sub(1);
+        let items = posts
+            .iter()
+            .map(|&i| {
+                let post = &app.posts[i];
+                vec![
+                    Line::styled(
+                        truncate(first_line(&post.body), width),
+                        Style::new().fg(Color::White),
+                    ),
+                    Line::styled(truncate(&counts_text(post), width), Style::new().fg(DIM)),
+                ]
+            })
+            .collect();
+        ProfileBody::Posts(items, page.post.min(posts.len() - 1))
+    };
+    rest.push((ACTIVITY, activity, !posts.is_empty()));
+
+    let height = |body: &ProfileBody| match body {
+        ProfileBody::Lines(lines) => lines.len() + 2,
+        ProfileBody::Posts(items, _) => items.iter().map(Vec::len).sum::<usize>() + 2,
+    };
+    let mut cards = Vec::new();
+    let top = profile_top_lines(app, page.name, width);
+    let top_height = u16_of(top.len() + 2).min(area.height);
+    cards.push(ProfileCard {
+        area: Rect {
+            height: top_height,
+            ..area
+        },
+        title: "",
+        body: ProfileBody::Lines(top),
+        selected: false,
+    });
+    let mut y = area.y + top_height;
+    let mut needs: Vec<usize> = rest.iter().map(|(_, body, _)| height(body)).collect();
+    if let Some(activity) = needs.last_mut() {
+        *activity = (*activity).min(ACTIVITY_MIN_HEIGHT);
+    }
+    let first = first_visible(&needs, needs.len() - 1, usize_of(area.bottom() - y));
+    for (title, body, selected) in rest.into_iter().skip(first) {
+        if y >= area.bottom() {
+            break;
+        }
+        let h = u16_of(height(&body)).min(area.bottom() - y);
+        cards.push(ProfileCard {
+            area: Rect::new(area.x, y, area.width, h),
+            title,
+            body,
+            selected,
+        });
+        y += h;
+    }
+    cards
+}
+
+/// A profile page in place of the body: the top card, About, Experience and
+/// Activity.
+fn render_profile_page(frame: &mut Frame, app: &App, page: &ProfilePage, area: Rect) {
+    for section in profile_cards(app, page, area) {
+        let block = card(section.title, section.selected);
+        let inner = block.inner(section.area);
+        frame.render_widget(block, section.area);
+        match section.body {
+            ProfileBody::Lines(lines) => frame.render_widget(Paragraph::new(lines), inner),
+            ProfileBody::Posts(items, selected) => {
+                render_list(frame, inner, items, Some(selected));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- Jobs
@@ -2004,7 +2266,69 @@ mod tests {
                     "o",
                 ),
             ),
+            ("profile", at(&[KeyCode::Char('v')], "")),
+            (
+                "profile over post",
+                at(
+                    &[
+                        KeyCode::Char('j'),
+                        KeyCode::Enter,
+                        KeyCode::Char('j'),
+                        KeyCode::Char('v'),
+                    ],
+                    "",
+                ),
+            ),
+            (
+                "profile invitation",
+                at(&[KeyCode::Char('2'), KeyCode::Char('v')], ""),
+            ),
+            (
+                "profile accepted",
+                at(
+                    &[KeyCode::Char('2'), KeyCode::Char('v'), KeyCode::Char('a')],
+                    "",
+                ),
+            ),
+            ("profile suggestion", network_profile(3, "")),
+            ("profile pending", network_profile(3, "c")),
+            ("profile messaging", {
+                let mut app = at(&[KeyCode::Char('4'), KeyCode::Char('j')], "");
+                press(&mut app, KeyCode::Char('v'));
+                app
+            }),
+            ("profile me", own_profile(&["hello", "Second post"])),
+            (
+                "search over profile",
+                at(&[KeyCode::Char('v'), KeyCode::Char('/')], "maren"),
+            ),
         ]
+    }
+
+    /// My Network with row `row` selected, its profile opened with `v`, then
+    /// `keys` typed on it.
+    fn network_profile(row: usize, keys: &str) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('2'));
+        for _ in 0..row {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('v'));
+        type_str(&mut app, keys);
+        app
+    }
+
+    /// Your own profile after publishing `posts`, the last one newest.
+    fn own_profile(posts: &[&str]) -> App {
+        let mut app = App::new();
+        for text in posts {
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, text);
+            press(&mut app, KeyCode::Enter);
+        }
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.profile_page.map(|p| p.name), Some("Jordan Vale"));
+        app
     }
 
     /// The inside of the post view's Post card on a `width`×`height` screen.
@@ -2333,15 +2657,15 @@ mod tests {
         let mut app = post_view(0);
         assert_eq!(
             footer(&app),
-            "j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit"
+            "j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit"
         );
-        assert!(hints_line(hints(&app)).width() <= 80);
+        assert!(hints_line(&hints(&app)).width() <= 80);
         press(&mut app, KeyCode::Char('c'));
         assert_eq!(
             footer(&app),
             "type write  backspace delete  enter post  esc cancel"
         );
-        assert!(hints_line(hints(&app)).width() <= 80);
+        assert!(hints_line(&hints(&app)).width() <= 80);
         for (key, what) in hints(&app) {
             assert_single_width("comment hints", key);
             assert_single_width("comment hints", what);
@@ -3179,7 +3503,7 @@ mod tests {
         for (name, mut app) in every_state() {
             app.status = None;
             let set = hints(&app);
-            let width = hints_line(set).width();
+            let width = hints_line(&set).width();
             assert!(width <= 80, "{name}: {width} columns");
             let footer = screen(&app, 80, 24)
                 .lines()
@@ -3192,11 +3516,11 @@ mod tests {
                 footer.ends_with(&format!("{key} {what}")),
                 "{name}: {footer:?}"
             );
-            if !seen.contains(&set.as_ptr()) {
-                seen.push(set.as_ptr());
+            if !seen.contains(&set) {
+                seen.push(set);
             }
         }
-        assert_eq!(seen.len(), 11, "every hint set was checked");
+        assert_eq!(seen.len(), 19, "every hint set was checked");
     }
 
     fn header_row(app: &App, width: u16, height: u16) -> String {
@@ -3457,6 +3781,12 @@ mod tests {
             strings.extend(chat.messages.iter().map(|m| m.body.as_str()));
         }
         strings.extend(app.notifications.iter().map(|n| n.text));
+        for m in &app.members {
+            strings.extend([m.name, m.headline, m.location, m.about]);
+            for role in &m.experience {
+                strings.extend([role.title, role.company, role.years]);
+            }
+        }
         strings.extend(Tab::ALL.iter().map(|t| t.label()));
         for s in strings {
             assert_single_width("data", s);
@@ -3801,7 +4131,7 @@ mod tests {
             assert_single_width("search hints", key);
             assert_single_width("search hints", what);
         }
-        assert!(hints_line(hints(&app)).width() <= 80);
+        assert!(hints_line(&hints(&app)).width() <= 80);
     }
 
     /// The text of `spans`, and its bold pieces.
@@ -4538,16 +4868,16 @@ mod tests {
         for (app, want) in [
             (
                 &feed,
-                "j/k move  l like  enter open  p post  r repost  s send  1-5 tabs  q quit",
+                "j/k move  l like  enter open  p post  r repost  s send  v profile  q quit",
             ),
             (
                 &detail,
-                "j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit",
+                "j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit",
             ),
             (&picker, "type filter  ↑/↓ move  enter send  esc cancel"),
         ] {
             assert_eq!(footer(app), want);
-            assert!(hints_line(hints(app)).width() <= 80, "{want}");
+            assert!(hints_line(&hints(app)).width() <= 80, "{want}");
             for (key, what) in hints(app) {
                 assert_single_width("send hints", key);
                 assert_single_width("send hints", what);
@@ -4997,6 +5327,662 @@ mod tests {
             "You: ",
         ] {
             assert_single_width("search", label);
+        }
+    }
+
+    // ------------------------------------------------------------ Profiles
+
+    /// The rows of the body on a `width`×`height` screen, trimmed on the right.
+    fn body_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let s = screen(app, width, height);
+        let rows: Vec<String> = s.lines().map(|l| l.trim_end().to_owned()).collect();
+        rows[3..rows.len() - 1].to_vec()
+    }
+
+    fn footer_at_80(app: &App) -> String {
+        screen(app, 80, 24)
+            .lines()
+            .last()
+            .expect("screen has rows")
+            .trim()
+            .to_owned()
+    }
+
+    /// The profile's cards on a `width`×`height` screen.
+    fn profile_rects(app: &App, width: u16, height: u16) -> Vec<(Rect, &'static str)> {
+        let page = app.profile_page.expect("a profile is open");
+        let body = screen_areas(Rect::new(0, 0, width, height))[1];
+        profile_cards(app, &page, body)
+            .into_iter()
+            .map(|c| (c.area, c.title))
+            .collect()
+    }
+
+    #[test]
+    fn a_profile_shows_its_four_cards() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('v'));
+        let rows = body_rows(&app, 120, 30);
+        let inside = |row: &str| {
+            row.trim_start_matches(['│', ' '])
+                .trim_end_matches(['│', ' '])
+                .to_owned()
+        };
+        assert!(rows[0].starts_with("╭──"), "{:?}", rows[0]);
+        assert_eq!(
+            inside(&rows[1]),
+            format!("Maren Holt · 1st{}Message", " ".repeat(92))
+        );
+        assert_eq!(inside(&rows[2]), "Staff Engineer at Quillfeather Systems");
+        assert_eq!(inside(&rows[3]), "Lisbon, Portugal · 38 mutual connections");
+        assert!(rows[5].starts_with("╭ About ─"), "{:?}", rows[5]);
+        assert_eq!(
+            inside(&rows[6]),
+            "I make build systems fast and boring. Fifteen years of backend work, the last five on Quillfeather's developer"
+        );
+        assert!(rows[9].starts_with("╭ Experience ─"), "{:?}", rows[9]);
+        assert_eq!(
+            rows[10..14].iter().map(|r| inside(r)).collect::<Vec<_>>(),
+            [
+                "Staff Engineer",
+                "Quillfeather Systems · 2021 - present",
+                "Senior Software Engineer",
+                "Ferngrove Analytics · 2015 - 2021",
+            ]
+        );
+        assert!(rows[15].starts_with("╭ Activity ─"), "{:?}", rows[15]);
+        assert_eq!(
+            inside(&rows[16]),
+            "▌I'm happy to share that our team cut the CI queue from 40 minutes to 6."
+        );
+        assert_eq!(inside(&rows[17]), "▌342 reactions · 3 comments");
+        assert!(rows[18].starts_with("╰"), "{:?}", rows[18]);
+
+        // The selected post has the bar and background, and Activity the
+        // light blue border, the top card a gray one.
+        let buf = buffer(&app, 120, 30);
+        assert_eq!(buf[(2, 19)].symbol(), "▌");
+        assert_eq!(buf[(3, 19)].bg, HIGHLIGHT_BG);
+        assert_eq!(buf[(0, 18)].fg, LIGHT_BLUE);
+        assert_eq!(buf[(0, 3)].fg, BORDER);
+        // Message is a button, on blue.
+        let x = u16_of(column_of(&rows[1], "Message").expect("shown"));
+        assert_eq!(buf[(x, 4)].bg, BLUE);
+        // The header still shows the tab it was opened from.
+        assert!(header_row(&app, 120, 30).contains("1 Home"));
+    }
+
+    #[test]
+    fn the_action_follows_the_person() {
+        let top_row = |app: &App| body_rows(app, 120, 30)[1].clone();
+        let invitation = network_profile(1, "");
+        let row = top_row(&invitation);
+        assert!(row.contains("Baptiste Moreau · 2nd"), "{row:?}");
+        assert!(row.ends_with("Ignore   Accept  │"), "{row:?}");
+        let rows = body_rows(&invitation, 120, 30);
+        assert!(rows[3].contains("Lyon, France · 3 mutual connections"));
+        assert!(rows.iter().any(|r| r.contains("No recent posts")));
+
+        // Accepted on the profile: 1st, and no button.
+        let mut accepted = network_profile(1, "a");
+        accepted.status = None;
+        let row = top_row(&accepted);
+        assert!(row.contains("Baptiste Moreau · 1st"), "{row:?}");
+        assert!(
+            !row.contains("Accept") && !row.contains("Ignore"),
+            "{row:?}"
+        );
+
+        // Ignored: still 2nd, and no button.
+        let row = top_row(&network_profile(0, "x"));
+        assert!(row.contains("Noor Haddad · 2nd"), "{row:?}");
+        assert!(row.trim_end_matches(['│', ' ']).ends_with("2nd"), "{row:?}");
+
+        // A suggestion: + Connect, then Pending, then + Connect again.
+        let row = top_row(&network_profile(3, ""));
+        assert!(row.contains("Amara Lindgren · 2nd"), "{row:?}");
+        assert!(row.contains("+ Connect"), "{row:?}");
+        let row = top_row(&network_profile(3, "c"));
+        assert!(
+            row.contains("◷ Pending") && !row.contains("Connect"),
+            "{row:?}"
+        );
+        let row = top_row(&network_profile(3, "cc"));
+        assert!(row.contains("+ Connect"), "{row:?}");
+
+        // A connection without a conversation: no button.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('v'));
+        let row = top_row(&app);
+        assert!(row.contains("Tobias Ferreira-Lund · 1st"), "{row:?}");
+        assert!(row.trim_end_matches(['│', ' ']).ends_with("1st"), "{row:?}");
+    }
+
+    #[test]
+    fn your_own_profile_shows_your_connections_and_posts() {
+        let mut app = own_profile(&["hello", "Second post"]);
+        let rows = body_rows(&app, 120, 30);
+        let text = rows.join("\n");
+        assert!(rows[1].contains("│ Jordan Vale "), "{:?}", rows[1]);
+        assert!(!rows[1].contains(" · "), "no degree: {:?}", rows[1]);
+        assert!(rows[2].contains("Software Engineer at Quillfeather Systems"));
+        assert!(rows[3].contains("312 connections"), "{:?}", rows[3]);
+        assert!(!text.contains("About") && !text.contains("Experience"));
+        assert!(!text.contains("Message") && !text.contains("Connect"));
+        assert!(rows[5].starts_with("╭ Activity"), "{:?}", rows[5]);
+        assert!(
+            rows[6].contains("▌Second post"),
+            "newest first: {:?}",
+            rows[6]
+        );
+        assert!(rows[7].contains("▌0 reactions · 0 comments"));
+        assert!(rows[8].contains(" hello"), "{:?}", rows[8]);
+        press(&mut app, KeyCode::Char('j'));
+        let rows = body_rows(&app, 120, 30);
+        assert!(rows[8].contains("▌hello"), "{:?}", rows[8]);
+        assert!(!rows[6].contains('▌'));
+
+        // The connection count is live.
+        let mut app = network_profile(0, "");
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "hi");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('v'));
+        assert!(body_rows(&app, 120, 30)[3].contains("313 connections"));
+    }
+
+    #[test]
+    fn activity_counts_are_live() {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "Nice");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('v'));
+        let text = body_rows(&app, 120, 30).join("\n");
+        assert!(text.contains("343 reactions · 4 comments"), "{text}");
+    }
+
+    #[test]
+    fn every_profile_shows_all_four_cards_at_80x24() {
+        let app = App::new();
+        for m in &app.members {
+            let mut app = App::new();
+            app.profile_page = Some(ProfilePage {
+                name: m.name,
+                post: 0,
+            });
+            let titles: Vec<&str> = profile_rects(&app, 80, 24).iter().map(|c| c.1).collect();
+            assert_eq!(titles, ["", ABOUT, EXPERIENCE, ACTIVITY], "{}", m.name);
+            let text = body_rows(&app, 80, 24).join("\n");
+            assert!(text.contains(m.headline), "{}", m.name);
+        }
+    }
+
+    #[test]
+    fn short_screens_drop_about_then_experience_but_keep_the_selection() {
+        let app = network_profile(1, "");
+        let titles = |app: &App, w, h| -> Vec<&'static str> {
+            profile_rects(app, w, h).iter().map(|c| c.1).collect()
+        };
+        assert_eq!(titles(&app, 60, 20), ["", EXPERIENCE, ACTIVITY]);
+        assert_eq!(titles(&app, 30, 16), ["", ACTIVITY]);
+        // The top card always comes first, at the top of the body.
+        for height in 4..=40 {
+            let cards = profile_rects(&app, 60, height);
+            assert_eq!(cards[0].0.y, 3, "{height}");
+            assert_eq!(cards[0].1, "", "{height}");
+        }
+
+        // A member with four posts at 80x24: Activity needs only room for one,
+        // so About and Experience stay, and the selected post scrolls into
+        // the rows Activity has.
+        let mut app = App::new();
+        for post in &mut app.posts[1..4] {
+            post.author = "Maren Holt";
+        }
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.activity("Maren Holt"), [0, 1, 2, 3]);
+        assert_eq!(titles(&app, 80, 24), ["", ABOUT, EXPERIENCE, ACTIVITY]);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        let text = body_rows(&app, 80, 24).join("\n");
+        assert!(
+            text.contains("▌Five years at Pinecrest Studio today."),
+            "{text}"
+        );
+        assert!(text.contains("╭ About"), "{text}");
+
+        // Twelve posts of yours at 80x24: the last one, selected, is on screen.
+        let posts: Vec<String> = (1..=12).map(|i| format!("Post number {i}")).collect();
+        let posts: Vec<&str> = posts.iter().map(String::as_str).collect();
+        let mut app = own_profile(&posts);
+        for _ in 0..11 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        let rows = body_rows(&app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("▌Post number 1 ")),
+            "{}",
+            rows.join("\n")
+        );
+        assert!(rows[1].contains("Jordan Vale"));
+    }
+
+    #[test]
+    fn a_narrow_top_card_puts_the_action_on_its_own_row() {
+        let app = network_profile(4, "");
+        // `Theo Vasquez-Hart · 2nd` and `+ Connect` need 34 columns inside.
+        let rows = body_rows(&app, 38, 20);
+        assert!(
+            rows[1].contains("Theo Vasquez-Hart · 2nd  + Connect"),
+            "{:?}",
+            rows[1]
+        );
+        let rows = body_rows(&app, 37, 20);
+        assert_eq!(rows[1], "│ Theo Vasquez-Hart · 2nd           │");
+        assert_eq!(rows[4], "│ + Connect                         │");
+        // Narrower still, the name is cut and the degree kept.
+        let rows = body_rows(&app, 20, 20);
+        assert_eq!(rows[1], "│ Theo Vasq… · 2nd │");
+    }
+
+    /// Your profile, with a long published post of double-width text.
+    fn own_wide() -> App {
+        let mut app = published_wide();
+        press(&mut app, KeyCode::Char('v'));
+        app
+    }
+
+    #[test]
+    fn profiles_stay_inside_their_borders_at_every_size() {
+        let mut states: Vec<(&str, App)> = every_state()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("profile"))
+            .collect();
+        states.push(("profile wide", own_wide()));
+        for row in [0, 2, 5] {
+            states.push(("profile network", network_profile(row, "")));
+        }
+        std::thread::scope(|scope| {
+            for (name, app) in &states {
+                scope.spawn(move || {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            let buf = terminal.backend().buffer();
+                            let body = screen_areas(Rect::new(0, 0, width, height))[1];
+                            for (area, title) in profile_rects(app, width, height) {
+                                assert!(
+                                    area.y >= body.y && area.bottom() <= body.bottom(),
+                                    "{name} {title:?} at {width}x{height}"
+                                );
+                                if area.height >= 2 && area.width >= 2 {
+                                    assert_bordered(
+                                        buf,
+                                        area,
+                                        &format!("{name} {title:?} at {width}x{height}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        // The wide post's first line fills its row to within one column.
+        let app = &own_wide();
+        let page = app.profile_page.expect("open");
+        let body = screen_areas(Rect::new(0, 0, 60, 20))[1];
+        let activity = profile_cards(app, &page, body)
+            .into_iter()
+            .find(|c| c.title == ACTIVITY)
+            .expect("Activity shows");
+        let buf = buffer(app, 60, 20);
+        let inner = card(ACTIVITY, true).inner(activity.area);
+        let row = text_between(&buf, inner.y, inner.x + 1, inner.right());
+        assert!(row.starts_with("a日本語"), "{row:?}");
+        assert!(
+            width_of(row.trim_end()) >= usize_of(inner.width) - 2,
+            "{row:?}"
+        );
+        assert!(row.trim_end().ends_with('…'), "{row:?}");
+    }
+
+    #[test]
+    fn profile_hints_and_labels() {
+        let cases = [
+            (
+                App::new(),
+                "j/k move  l like  enter open  p post  r repost  s send  v profile  q quit",
+            ),
+            (
+                every_state().remove(2).1,
+                "j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit",
+            ),
+            (
+                {
+                    let mut app = App::new();
+                    press(&mut app, KeyCode::Char('2'));
+                    app
+                },
+                "j/k move  a accept  x ignore  c connect  v profile  tab next  1-5 tabs  q quit",
+            ),
+            (
+                {
+                    let mut app = App::new();
+                    press(&mut app, KeyCode::Char('4'));
+                    app
+                },
+                "j/k move  enter open  v profile  tab next  1-5 tabs  q quit",
+            ),
+            (
+                network_profile(0, ""),
+                "a accept  x ignore  esc back  1-5 tabs  q quit",
+            ),
+            (
+                network_profile(3, ""),
+                "c connect  esc back  1-5 tabs  q quit",
+            ),
+            (
+                {
+                    let mut app = network_profile(3, "c");
+                    app.status = None;
+                    app
+                },
+                "c withdraw  esc back  1-5 tabs  q quit",
+            ),
+            (
+                {
+                    let mut app = App::new();
+                    press(&mut app, KeyCode::Char('v'));
+                    app
+                },
+                "enter open  m message  esc back  1-5 tabs  q quit",
+            ),
+            (
+                own_profile(&["hello"]),
+                "enter open  esc back  1-5 tabs  q quit",
+            ),
+        ];
+        for (app, want) in &cases {
+            assert_eq!(footer_at_80(app), *want);
+            assert!(hints_line(&hints(app)).width() <= 80, "{want}");
+            for (key, what) in hints(app) {
+                assert_single_width("profile hints", key);
+                assert_single_width("profile hints", what);
+            }
+        }
+        // The two tightest sets fill the line exactly, and Home has room.
+        assert_eq!(hints_line(&hints(&cases[1].0)).width(), 80);
+        assert_eq!(hints_line(&hints(&cases[2].0)).width(), 80);
+        assert_eq!(hints_line(&hints(&cases[0].0)).width(), 75);
+        for label in [
+            ABOUT,
+            EXPERIENCE,
+            ACTIVITY,
+            NO_RECENT_POSTS,
+            " Message ",
+            "Ignore",
+            " Accept ",
+            "+ Connect",
+            "◷ Pending",
+            " · 1st",
+            " · 2nd",
+            " mutual connections",
+            " connections",
+        ] {
+            assert_single_width("profile", label);
+        }
+    }
+
+    /// A profile of `name` with exactly `posts` posts (the first ones in
+    /// `posts` are given to them, and their own others to Wendell
+    /// Achterberg), opened from the Home feed.
+    fn profile_with_posts(name: &'static str, posts: usize, keys: &str) -> App {
+        let mut app = App::new();
+        for (i, post) in app.posts.iter_mut().enumerate() {
+            if i < posts {
+                post.author = name;
+            } else if post.author == name {
+                post.author = "Wendell Achterberg";
+            }
+        }
+        app.profile_page = Some(ProfilePage { name, post: 0 });
+        type_str(&mut app, keys);
+        app.status = None;
+        app
+    }
+
+    #[test]
+    fn profile_footers_name_only_what_works() {
+        // (whose, keys typed on the profile, the action's hints)
+        let people = [
+            ("Noor Haddad", "", "a accept  x ignore  "),
+            ("Amara Lindgren", "", "c connect  "),
+            ("Amara Lindgren", "c", "c withdraw  "),
+            ("Maren Holt", "", "m message  "),
+            ("Tobias Ferreira-Lund", "", ""),
+            ("Noor Haddad", "a", ""),
+            ("Noor Haddad", "x", ""),
+            ("Jordan Vale", "", ""),
+        ];
+        for (name, keys, action) in people {
+            for (posts, moves) in [(0, ""), (1, "enter open  "), (2, "j/k posts  enter open  ")] {
+                let app = profile_with_posts(name, posts, keys);
+                assert_eq!(app.activity(name).len(), posts, "{name}");
+                let want = format!("{moves}{action}esc back  1-5 tabs  q quit");
+                assert_eq!(
+                    footer_at_80(&app),
+                    want,
+                    "{name} {keys:?} with {posts} posts"
+                );
+                assert!(hints_line(&hints(&app)).width() <= 71, "{want}");
+            }
+        }
+        // The widest a profile footer gets.
+        let app = profile_with_posts("Noor Haddad", 2, "");
+        assert_eq!(hints_line(&hints(&app)).width(), 71);
+    }
+
+    #[test]
+    fn the_post_view_footer_names_x_delete_only_for_your_comment() {
+        let footer = |app: &App| footer_at_80(app);
+        let others =
+            "j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit";
+        let yours =
+            "j/k comments  l like  c comment  x delete  s send  v profile  esc back  q quit";
+
+        // Maren Holt's post: a seed comment, then yours, then a seed one again.
+        let mut app = post_view(0);
+        assert_eq!(footer(&app), others);
+        comment_on(&mut app, "Nice");
+        app.status = None;
+        assert_eq!(app.mode, Mode::PostDetail { comment: 3 });
+        assert_eq!(footer(&app), yours);
+        assert_eq!(hints_line(&hints(&app)).width(), 80);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(footer(&app), others);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('x'));
+        app.status = None;
+        assert_eq!(footer(&app), others, "deleted, Hana Sorensen's is selected");
+
+        // Lucia Brandt's post: no comments to move between, so no `j/k`.
+        let mut app = post_view(7);
+        assert_eq!(app.selected_post().map(|p| p.author), Some("Lucia Brandt"));
+        assert_eq!(
+            footer(&app),
+            "l like  c comment  r repost  s send  v profile  esc back  q quit"
+        );
+        comment_on(&mut app, "Thanks");
+        app.status = None;
+        assert_eq!(
+            footer(&app),
+            "l like  c comment  x delete  s send  v profile  esc back  q quit"
+        );
+        // A repost card's post view follows the original's comments.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('r'));
+        select_first_card(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.feed[app.post_sel].repost);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        assert_eq!(
+            footer(&app),
+            "l like  c comment  x delete  s send  v profile  esc back  q quit"
+        );
+    }
+
+    fn select_first_card(app: &mut App) {
+        while app.post_sel > 0 {
+            press(app, KeyCode::Char('k'));
+        }
+    }
+
+    /// The keys a hint stands for.
+    fn hint_keys(key: &str) -> Vec<KeyCode> {
+        match key {
+            "j/k" => vec![KeyCode::Char('j'), KeyCode::Char('k')],
+            "1-5" => ('1'..='5').map(KeyCode::Char).collect(),
+            "enter" => vec![KeyCode::Enter],
+            "esc" => vec![KeyCode::Esc],
+            k => vec![KeyCode::Char(k.chars().next().expect("a key"))],
+        }
+    }
+
+    /// Whether pressing `code` on a fresh `make()` changes the screen or quits.
+    /// A toast left from setting the state up is cleared first, since any key
+    /// would clear it.
+    fn acts(make: &dyn Fn() -> App, code: KeyCode) -> bool {
+        let mut app = make();
+        app.status = None;
+        let before = screen(&app, 120, 30);
+        press(&mut app, code);
+        app.should_quit || screen(&app, 120, 30) != before
+    }
+
+    #[test]
+    fn every_key_a_footer_names_does_something() {
+        type Make = Box<dyn Fn() -> App>;
+        let states: Vec<(&str, Make, &[char])> = vec![
+            (
+                "Noor, no posts",
+                Box::new(|| network_profile(0, "")),
+                &['j', 'k', '\n', 'c', 'm'],
+            ),
+            (
+                "Noor, 1 post",
+                Box::new(|| profile_with_posts("Noor Haddad", 1, "")),
+                &['j', 'k', 'c', 'm'],
+            ),
+            (
+                "Noor, 2 posts",
+                Box::new(|| profile_with_posts("Noor Haddad", 2, "")),
+                &['c', 'm'],
+            ),
+            (
+                "Amara",
+                Box::new(|| network_profile(3, "")),
+                &['j', 'k', '\n', 'a', 'x', 'm'],
+            ),
+            (
+                "Amara pending",
+                Box::new(|| profile_with_posts("Amara Lindgren", 0, "c")),
+                &['j', 'k', '\n', 'a', 'x', 'm'],
+            ),
+            (
+                "Maren",
+                Box::new(|| {
+                    let mut app = App::new();
+                    press(&mut app, KeyCode::Char('v'));
+                    app
+                }),
+                &['j', 'k', 'a', 'x', 'c'],
+            ),
+            (
+                "Maren, 2 posts",
+                Box::new(|| profile_with_posts("Maren Holt", 2, "")),
+                &['a', 'x', 'c'],
+            ),
+            (
+                "Tobias",
+                Box::new(|| profile_with_posts("Tobias Ferreira-Lund", 0, "")),
+                &['j', 'k', '\n', 'a', 'x', 'c', 'm'],
+            ),
+            (
+                "Noor accepted",
+                Box::new(|| network_profile(0, "a")),
+                &['j', 'k', '\n', 'a', 'x', 'c', 'm'],
+            ),
+            (
+                "you, 3 posts",
+                Box::new(|| own_profile(&["a", "b", "c"])),
+                &['a', 'x', 'c', 'm'],
+            ),
+            ("post view", Box::new(|| post_view(0)), &[]),
+            (
+                "post view, yours",
+                Box::new(|| {
+                    let mut app = post_view(0);
+                    comment_on(&mut app, "Nice");
+                    app
+                }),
+                &[],
+            ),
+            (
+                "post view, no comments",
+                Box::new(|| post_view(7)),
+                &['j', 'k', 'x'],
+            ),
+            (
+                "post view, your only comment",
+                Box::new(|| {
+                    let mut app = post_view(7);
+                    comment_on(&mut app, "Thanks");
+                    app
+                }),
+                &['j', 'k'],
+            ),
+        ];
+        for (name, make, inert) in &states {
+            let app = make();
+            let hinted: Vec<&str> = hints(&app).iter().map(|h| h.0).collect();
+            for key in &hinted {
+                assert!(
+                    hint_keys(key)
+                        .into_iter()
+                        .any(|code| acts(make.as_ref(), code)),
+                    "{name}: {key:?} is in the footer but does nothing"
+                );
+            }
+            for &ch in *inert {
+                let code = if ch == '\n' {
+                    KeyCode::Enter
+                } else {
+                    KeyCode::Char(ch)
+                };
+                let hint = match ch {
+                    'j' | 'k' => "j/k".to_owned(),
+                    '\n' => "enter".to_owned(),
+                    _ => ch.to_string(),
+                };
+                assert!(
+                    !hinted.contains(&hint.as_str()),
+                    "{name}: {hint:?} is in the footer"
+                );
+                assert!(!acts(make.as_ref(), code), "{name}: {ch:?} does something");
+            }
         }
     }
 }

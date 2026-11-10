@@ -18,7 +18,9 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   to a conversation, reposting it to the top of your feed, writing a post, accepting or ignoring invitations,
   sending connection requests, saving jobs and applying, reading and replying
   to messages, and clearing notifications. `/` searches people, jobs, posts,
-  comments and messages and jumps to the result.
+  comments and messages and jumps to the result. `v` opens the profile of
+  the person under the selection: who they are, what they've done and what
+  they've posted, in one place.
 - One self-contained binary. No network, no files written at runtime and no
   real data: all content is hard-coded, fictional and safe for work.
 
@@ -58,7 +60,8 @@ cargo clippy --all-targets -- -D warnings
 Captured from the real binary in a 120×30 tmux pane (re-captured after the
 narrow-header, wide-text and notification changes, and unchanged by them;
 re-captured again after the Send picker, which only added `s send` to the
-footer, and after Repost, which only changed the footer again):
+footer, after Repost, which only changed the footer again, and after
+profile pages, which swapped `1-5 tabs` for `v profile` in it):
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -90,7 +93,7 @@ footer, and after Repost, which only changed the footer again):
                         │ Technical Recruiter at Harborline Talent                       │
                         │ We're hiring! Harborline Logistics is looking for a Site       │
                         ╰────────────────────────────────────────────────────────────────╯
- j/k move  l like  enter open  p post  r repost  s send  1-5 tabs  q quit
+ j/k move  l like  enter open  p post  r repost  s send  v profile  q quit
 ```
 
 **No emoji, on purpose.** Every glyph is a single-width character:
@@ -137,16 +140,40 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     stale.
 - **Footer:** key hints for the current tab and mode. A toast replaces them
   (white on blue) until the next key press. Every hint set fits on one line at
-  80 columns. There are eleven sets: Home, post view, comment box, composer,
-  My Network, Jobs, Messaging list, reply box, Notifications, search and the
-  Send picker. Jobs reads
+  80 columns. **A hint names only a key that does something right now.**
+  Most sets are fixed: Home, comment box, composer, My Network, Jobs,
+  Messaging list, reply box, Notifications, search and the Send picker.
+  The post view's (`post_view_hints`) and a profile's (`profile_hints`,
+  below) are built from the current state. Jobs reads
   `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
   (72 columns with the padding). Home reads
-  `j/k move  l like  enter open  p post  r repost  s send  1-5 tabs  q quit`
-  (74) and the post view
-  `j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit`
-  (79). To make room for `r repost`, Home dropped `tab next` and the post
-  view `1-5 tabs`. Those keys still work there. A narrower terminal cuts every set on the
+  `j/k move  l like  enter open  p post  r repost  s send  v profile  q quit`
+  (75), the post view
+  `j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit`
+  (80) with someone else's comment selected, My Network
+  `j/k move  a accept  x ignore  c connect  v profile  tab next  1-5 tabs  q quit`
+  (80) and Messaging `j/k move  enter open  v profile  tab next  1-5 tabs  q quit`
+  (61). To make room for `r repost`, Home dropped `tab next` and the post
+  view `1-5 tabs`. To make room for `v profile` (11 columns), Home dropped
+  `1-5 tabs` too (74 + 11 would be 85). Both keys still work there. My
+  Network had exactly 11 columns to spare, so it gives nothing up.
+  - **The post view's footer** follows the selected comment and the post:
+    - `x delete` shows exactly when the selected comment is yours
+      (`App::is_yours`, the same check `x` makes before deleting), so the
+      hint is there whenever `x` would delete and never otherwise. With
+      `v profile` there is room for only one of `x delete` and `r repost`
+      (each 10 columns; all three would be 90), so `x delete` takes
+      `r repost`'s place:
+      `j/k comments  l like  c comment  x delete  s send  v profile  esc back  q quit`
+      (80). `r` still reposts, and Repost is still spelled out on the card's
+      action row just above. `x delete` wins because deleting has no other
+      cue on screen, and you only see it with your own comment selected.
+      Dropping `q quit` or shortening `j/k comments` would not have been
+      enough on its own, and `esc back` is how you leave the post view.
+    - `j/k comments` shows only when the post has two comments or more, since
+      with one or none `j` and `k` don't move anything: Lucia Brandt's post
+      reads `l like  c comment  r repost  s send  v profile  esc back  q quit`.
+  - A narrower terminal cuts every set on the
   right. `J/K scroll` comes last so that a Jobs footer narrower than 72
   columns shows what it did before the details could scroll: everything up
   to `q quit` from 60 columns, cut in the same place below that.
@@ -526,6 +553,103 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
   end of the query and the cursor. `header_fit` doesn't look at search, so the
   header lays out the same with search open or closed.
 
+### Profile
+
+`v` opens the profile of the person under the selection (see "Key
+bindings"). It replaces the body under the header, whichever tab it was
+opened from, as LinkedIn's profile page does; the header and its active tab
+stay as they were. Captured from the real binary in a 120×30 tmux pane,
+after `v` on Maren Holt's post:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ in    ⌕ Search                                 1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Maren Holt · 1st                                                                                            Message  │
+│ Staff Engineer at Quillfeather Systems                                                                               │
+│ Lisbon, Portugal · 38 mutual connections                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ About ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ I make build systems fast and boring. Fifteen years of backend work, the last five on Quillfeather's developer       │
+│ platform. Ask me about caching, flaky tests or sourdough.                                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Experience ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Staff Engineer                                                                                                       │
+│ Quillfeather Systems · 2021 - present                                                                                │
+│ Senior Software Engineer                                                                                             │
+│ Ferngrove Analytics · 2015 - 2021                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Activity ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ▌I'm happy to share that our team cut the CI queue from 40 minutes to 6.                                             │
+│ ▌342 reactions · 3 comments                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+ enter open  m message  esc back  1-5 tabs  q quit
+```
+
+From the top (`profile_cards`, drawn by `render_profile_page`), each a
+full-width card:
+
+- **Top card** (no title, `profile_top_lines`): the name in bold and the
+  degree, `Maren Holt · 1st`; the headline; then
+  `location · N mutual connections` (singular for 1). The action goes on the
+  right of the name row, as the buttons do on a My Network row and drawn by
+  the same helpers: `Ignore   Accept` for a pending invitation
+  (`invitation_buttons`), `+ Connect` or `◷ Pending` for a suggestion
+  (`connect_button`), and a ` Message ` button, white on blue, for someone
+  you have a conversation with. When the whole name, the degree and the
+  action don't fit on one row with two columns between, the action gets a
+  row of its own under the location. Narrower still, the name is cut with
+  `…` and the degree kept (`Theo Vasq… · 2nd`). Someone with no action (you,
+  an accepted or ignored invitation, a connection you've never messaged)
+  shows none.
+- **About:** the member's few sentences, word-wrapped.
+- **Experience:** two lines per role, newest first: the title in bold, then
+  `Company · 2021 - present` dim. The first role is the current one and
+  matches the headline.
+- **Activity:** their posts, newest first, two lines each: the post's first
+  line (`first_line`) cut with `…`, then its live `N reactions · M comments`
+  (`counts_text`, also behind the feed card's counts line). The selected post
+  has the usual `▌` bar and background (`render_list`), and the card the
+  light blue border. With no posts the card says `No recent posts` and has
+  a gray border.
+
+**Your own profile** (from `v` on a post you published, or a repost of it)
+has the top card with your name, no degree, your headline and
+`312 connections` (live, so accepting an invitation raises it), then only
+Activity: no About, no Experience and no action.
+
+**Short and narrow screens:** the top card is always first, at the top of
+the body. The cards below it give way whole, About first, then Experience,
+when they and Activity's first 4 rows (`ACTIVITY_MIN_HEIGHT`: its border
+and one post) don't fit (`first_visible` with Activity as the selection),
+so the selected post stays on screen; within Activity, `render_list`
+scrolls to it. The last card shown is cut short at the bottom and keeps its
+border, like the last feed card. Every member's profile shows all four
+cards at 80×24; at 60×20 an invitation's profile drops About, and at 30×16
+Experience too. Every line is cut or wrapped by display width (`truncate`,
+`wrap`), so a published post of wide text stays inside the Activity card.
+
+**Hints** (`profile_hints`) name only keys that do something on this
+profile now. `j/k posts` shows only with two posts or more in Activity (with
+one there's nothing to move to), and `enter open` only with at least one.
+Then comes just the action the top card offers: `a accept  x ignore`
+(invitation), `c connect` or `c withdraw` (suggestion, by its state),
+`m message` (conversation), or nothing. Last comes
+`esc back  1-5 tabs  q quit`, which always work. So Noor Haddad's profile
+reads `a accept  x ignore  esc back  1-5 tabs  q quit`, Maren Holt's (one
+post) `enter open  m message  esc back  1-5 tabs  q quit`, and an accepted
+invitation's just `esc back  1-5 tabs  q quit`. The longest possible, an
+invitation with two posts, is 71 columns. The seed never has that: no
+invitation posts.
+
 ## Data model (`src/data.rs`)
 
 ```rust
@@ -545,6 +669,9 @@ enum   Workplace    { Remote, Hybrid, OnSite }
 struct Conversation { name, headline, messages: Vec<Message>, unread: bool }
 struct Message      { from_me: bool, body: String, hours_ago: u32 }
 struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
+struct Member       { name, headline, location, mutual: u32, about,
+                      experience: Vec<Role>, connected: bool }
+struct Role         { title, company, years }
 ```
 
 - **Strings are `&'static str`** except `Post::body`, `Message::body` and
@@ -566,17 +693,33 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 - **The comment count is `comments.len()`.** Unlike workit, there is no
   separate displayed total, so the card and the post view always agree,
   including right after you comment.
+- **One `Member` per person, not per place.** `data::members()` holds a
+  profile for every post author, invitation, suggestion and conversation
+  partner (every commenter is one of those too): 16 people, each once, and
+  never you. A person who posts, comments and messages you, like Maren Holt
+  or Ines Okonkwo, has the one profile. Each copy of a headline elsewhere in
+  the seed (posts, comments, invitations, suggestions, conversations) is
+  the member's headline, the member's first role is `title at company` of
+  that headline, and an invitation's or suggestion's `mutual` is the
+  member's; a test holds all of this to the seed, so a profile can't
+  contradict a post card.
+- **`Member::connected` is the only stored degree.** It is `true` in the seed
+  for the nine post authors (and so the four conversation partners) and
+  `false` for the invitations and suggestions, and accepting an invitation
+  sets it. Ignoring one leaves it `false`.
 - **Seed:** you are "Jordan Vale" with 312 connections. 9 posts, 5 news items,
-  3 invitations, 4 suggestions, 6 jobs (1 saved), 4 conversations (2 unread)
-  and 5 notifications (3 unread). Companies (Quillfeather Systems,
+  3 invitations, 4 suggestions, 6 jobs (1 saved), 4 conversations (2 unread),
+  5 notifications (3 unread) and 16 members, each with a real city, a few
+  sentences of About and two roles. Companies (Quillfeather Systems,
   Brightkettle, Pinecrest Studio, Harborline, Tinderbox Robotics, Larkspur
-  Labs) and people are invented. Cities are real.
+  Labs, and on Experience cards a few more, such as Ferngrove Analytics and
+  Copperline Telecom) and people are invented. Cities are real.
 
 ## App state (`src/app.rs`)
 
 | Field | Meaning |
 |---|---|
-| `profile`, `posts`, `news`, `invitations`, `suggestions`, `jobs`, `conversations`, `notifications` | seed data, mutated in place. `posts` holds every post once, newest first |
+| `profile`, `posts`, `news`, `invitations`, `suggestions`, `jobs`, `conversations`, `notifications`, `members` | seed data, mutated in place. `posts` holds every post once, newest first. `members` holds one profile per person other than you |
 | `feed: Vec<Card>` | the Home feed, top to bottom. A `Card { post: PostId, repost: bool }` is a post's own card or your repost of it. Every post has exactly one own card, in the order of `posts`, and reposts go in between |
 | `tab: Tab` | `Home`, `Network`, `Jobs`, `Messaging`, `Notifications` |
 | `mode: Mode` | `Browse`, `PostDetail { comment }`, `CommentBox { comment }`, `Composer`, `Reply` |
@@ -587,6 +730,7 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 | `draft`, `reply`, `comment_draft` | composer, reply box and comment box text |
 | `search: Option<Search>` | `Some { query, selected }` while search is open. `selected` indexes `App::search_hits` |
 | `send: Option<SendPicker>` | `Some { query, selected }` while the Send picker is open. `query` is the filter, `selected` indexes `App::send_recipients` |
+| `profile_page: Option<ProfilePage>` | `Some { name, post }` while a profile is open over the current tab and mode. `name` is whose (a member's or yours), `post` indexes `App::activity(name)` |
 | `status: Option<&'static str>` | toast text. Every toast is a fixed string. Cleared on the next key press |
 | `should_quit` | checked by the event loop in `main.rs` |
 
@@ -689,8 +833,9 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
   the post's reactions, like state or comments, or `post_sel`. Sending the
   same post twice sends two messages. Messages are searched, so
   `shared a post` then finds the recipient's conversation.
-- **Switching tabs** (with `1`-`5`, `Tab` or `BackTab`) closes the post view,
-  so coming back to Home shows the feed with the same post selected.
+- **Switching tabs** (with `1`-`5`, `Tab` or `BackTab`) closes the post view
+  and the profile page, so coming back to Home shows the feed with the same
+  post selected.
   Entering Notifications from another tab copies each `unread` into `is_new`
   and clears `unread`. Leaving it clears `is_new`. Pressing `5` while already
   there changes nothing.
@@ -723,6 +868,38 @@ struct Notification { text, hours_ago: u32, unread: bool, is_new: bool }
 - **Opening a conversation** (`open_conversation`) is shared by `Enter` on
   Messaging and a search jump: it marks `chat_sel`'s conversation read, sets
   `open_chat`, clears `reply` and focuses the reply box (`Mode::Reply`).
+- **A profile sits on top of `mode`,** like search. `v` (or `Enter` on My
+  Network) sets `profile_page` and leaves `tab`, `mode` and every selection
+  alone, so Esc (`profile_page = None`) puts back exactly what was there,
+  including the post view's selected comment and the open thread. While it
+  is open, `on_key` sends keys to `on_profile_key` (after search and the
+  picker, before the mode), so nothing reaches the tab underneath. `/`
+  opens search over it, and search's Esc returns to it. Switching tabs
+  (`set_tab`) closes it, which also covers every search jump, `m` and
+  `Enter` on Activity.
+- **Nothing on a profile is stored but whose it is and the selected post.**
+  `App::degree(name)` reads `Member::connected` (`1st` or `2nd`; `None` for
+  you). `App::profile_action(name)` looks the name up in the live lists:
+  `Invitation(i)` while they're in `invitations`, `Suggestion(i)` while in
+  `suggestions` (`+ Connect` or `◷ Pending` from its `pending`), otherwise
+  `Message(chat)` when you have a conversation with them, and nothing for
+  you. `App::activity(name)` is the indexes of their posts in `posts`, which
+  is newest first, so a post you publish goes first in your Activity at
+  once. Counts are read from the posts when drawn.
+- **Accepting, ignoring and connecting share one function.**
+  `act_on_network_item(code, item)` does what `a`, `x` and `c` do, with the
+  same toasts, then clamps `network_sel` as removing an invitation always
+  has. My Network calls it with the selected row, a profile with the
+  person's own row (`network_item_of(name)`), or `None`, which does nothing
+  but the clamp. Accepting also sets `connected`, so the open profile shows
+  `1st` and no action at once. A profile opened from My Network is the
+  selected row's, so after `a` or `x` there and Esc, the list shows the same
+  selection as `a` or `x` on the row would.
+- **The routes out are shared too.** `go_to_post(i, mode)` (Home, on post
+  `i`'s own card via `card_of`, then `mode`) is what search's post and
+  comment jumps and `Enter` on Activity (`PostDetail { comment: 0 }`) use.
+  `go_to_conversation(chat)` (Messaging, `chat_sel = chat`, then
+  `open_conversation`) is what search's conversation jump and `m` use.
 - **Text boxes:** a key is typed when it is `KeyCode::Char` without Ctrl or
   Alt. Shift is fine.
 
@@ -735,11 +912,11 @@ the Send picker:
 
 | Key | Action |
 |---|---|
-| `1`-`5` | switch tab |
+| `1`-`5` | switch tab (from a profile too, closing it) |
 | `Tab` / `Shift-Tab` | next / previous tab, wrapping both ways |
-| `j`/`↓`, `k`/`↑` | move the selection in the current list (comments in the post view) |
-| `/` | open search (also from the post view) |
-| `Esc` | close the post view. Otherwise nothing, so it never quits |
+| `j`/`↓`, `k`/`↑` | move the selection in the current list (comments in the post view, Activity on a profile) |
+| `/` | open search (also from the post view and a profile) |
+| `Esc` | close the profile, or else the post view. Otherwise nothing, so it never quits |
 | `q` | quit |
 
 Per tab:
@@ -753,13 +930,37 @@ Per tab:
 | Home | `x` | in the post view, delete the selected comment if it's yours: "Comment deleted". Otherwise, and in the feed, nothing |
 | Home | `s` | open the Send picker for the selected post, from the feed or the post view |
 | Home | `r` | repost the selected post to the top of the feed: "Reposted", the selection stays on the same post (and comment, in the post view). "Already reposted" and no change if it is reposted already, including on its repost card |
+| Home | `v` | open the profile of the selected post's author, from the feed or the post view (always the post's author there, whichever comment is selected). On a repost card, the original's author. On a post you published, your own profile |
 | My Network | `a` | accept the selected invitation: removed, connections +1, "Invitation accepted" |
 | My Network | `x` | ignore it: removed, connections unchanged, "Invitation ignored" |
 | My Network | `c` | on a suggestion, Connect ↔ Pending: "Invitation sent" / "Invitation withdrawn" |
+| My Network | `v` / `Enter` | open the selected invitation's or suggestion's profile |
 | Jobs | `s` | save / unsave: "Job saved" / "Job unsaved" |
 | Jobs | `e` | Easy Apply: "Application sent", then "Already applied" with no change |
 | Jobs | `J` / `K` | scroll the details down / up one line (Shift-j / Shift-k), stopping at the top and where the description ends on the last row |
 | Messaging | `Enter` | open the selected conversation, mark it read, focus the reply box |
+| Messaging | `v` | open the profile of the selected conversation's person (the one under the cursor, not the open thread), from the list |
+
+`v` does nothing on Jobs and Notifications, and on a profile.
+
+**Profile:** keys go to the profile, never to the tab and mode under it, so
+`l`, `r`, `s`, `p`, `e`, `J`, `K` and `v` do nothing there.
+
+| Key | Action |
+|---|---|
+| `j`/`↓`, `k`/`↑` | move through Activity, stopping at both ends |
+| `Enter` | go to the selected Activity post: Home, on the post's own card (never a repost), in the post view with its first comment selected, the route a search jump to a comment takes. Nothing with no Activity |
+| `a` / `x` | accept / ignore their pending invitation, exactly as on My Network (same toasts, connections, badge and clamped `network_sel`). The profile stays open: accepted, it shows `1st` and no action; ignored, `2nd` and no action |
+| `c` | connect to / withdraw from their suggestion, as on My Network. The button follows at once |
+| `m` | open your conversation with them, as `Enter` on Messaging does (`open_conversation`: Messaging, marked read, reply draft cleared, reply box focused). Nothing without a conversation |
+| `Esc` | close the profile, back to exactly the tab, mode and selections it was opened from |
+| `/` | search over the profile. Esc from search returns to it; a jump closes it |
+| `1`-`5`, `Tab`, `Shift-Tab` | switch tab, closing the profile, as from the post view |
+| `q` | quit |
+
+`a`, `x` and `c` do nothing, not even a toast, when the person isn't a
+pending invitation (`a`, `x`) or a suggestion (`c`): on a connection's
+profile, your own, or after accepting or ignoring.
 
 `a`/`x` on a suggestion and `c` on an invitation do nothing, not even a
 toast. `s` does nothing on My Network, Messaging and Notifications. `r` does
@@ -768,14 +969,14 @@ nothing on My Network, Jobs, Messaging and Notifications. On a repost card,
 `K` do nothing off Jobs, including in the post view. Opening Notifications by any route marks them all read.
 
 **Composer:** every printable key, including `q`, `j`, `k`, `J`, `K`, `l`,
-`1`-`5`, `a`, `x`, `c`, `s`, `e` and `r`, is typed. `Backspace` deletes. `Enter` publishes
+`1`-`5`, `a`, `x`, `c`, `s`, `e`, `r`, `v` and `m`, is typed. `Backspace` deletes. `Enter` publishes
 and toasts "Post published", or toasts "Write something first" and stays open
 when the draft is empty or only whitespace. `Esc` discards the draft. `Tab`
 does nothing.
 
 **Search:** a text box like the composer. Every printable key without Ctrl
 or Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `p`, `a`, `x`, `c`,
-`s`, `e`, `r`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
+`s`, `e`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
 scroll). `Backspace` deletes, and does nothing
 on an empty query (search stays open). `↓`/`↑` move through the results,
 stopping at both ends. Any change to the query selects the first result
@@ -797,8 +998,8 @@ search open with the query. `Esc` closes it and discards the query. `Tab`,
 quits).
 
 **Comment box:** a text box like search. Every printable key without Ctrl or
-Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `r`, `/`
-and `1`-`5`, and does nothing else (no quit, comment move, like, delete,
+Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `r`,
+`v`, `m`, `/` and `1`-`5`, and does nothing else (no quit, comment move, like, delete,
 repost, composer, search or tab switch). `Backspace` deletes, and does nothing on an empty draft (the box
 keeps focus). `Enter` posts the comment, selects it and toasts "Comment
 posted", or toasts "Write something first" and keeps the box focused, with
@@ -809,8 +1010,8 @@ nothing (Ctrl-C still quits).
 
 **Send picker:** a text box like search. Every printable key without Ctrl
 or Alt is typed into the filter, including `q`, `j`, `k`, `J`, `K`, `l`, `c`,
-`x`, `p`, `s`, `r`, `/` and `1`-`5`, and does nothing else (no quit, tab
-switch, move, like, comment box, delete, repost, composer or search). `Backspace` deletes, and does
+`x`, `p`, `s`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (no
+quit, tab switch, move, like, comment box, delete, repost, composer or search). `Backspace` deletes, and does
 nothing on an empty filter (the picker stays open). `↓`/`↑` move through the
 recipients, stopping at both ends, and any change to the filter selects the
 first recipient again. `Enter` sends the post to the selected recipient,
@@ -819,7 +1020,7 @@ matches" and keeps the picker open with the filter as typed. `Esc` closes it
 and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key
 do nothing (Ctrl-C still quits).
 
-**Reply box:** printable keys, `J`, `K` and `r` included, are typed the same way. `Enter` appends the
+**Reply box:** printable keys, `J`, `K`, `r`, `v` and `m` included, are typed the same way. `Enter` appends the
 reply to the thread as yours, clears the box and keeps focus. An empty or
 whitespace-only reply does nothing. `Esc` discards the text and returns focus
 to the list.
@@ -834,8 +1035,9 @@ workedin/
   src/
     main.rs     ratatui::init()/restore() plus cursor::Show, the panic hook, the event loop
                 (which fits the job details scroll to the screen before each frame)
-    app.rs      state, key handling, badges, search, sending. No rendering, no I/O
-    data.rs     seed profile, posts, news, people, jobs, conversations, notifications
+    app.rs      state, key handling, badges, search, sending, profiles. No rendering, no I/O
+    data.rs     seed profile, posts, news, people, jobs, conversations, notifications,
+                and one member profile per person
     ui.rs       draw(frame, &App): all rendering, pure
 ```
 
@@ -873,11 +1075,19 @@ Publishing `hello` put it first and the repost below it still showed Maren
 Holt's post. After `q`, `stty -a` matched its output from before launch,
 the alternate screen was off and the cursor was visible.
 
+After profile pages were added, both paths were checked again in a 120×30
+private tmux session (`tmux -L wprof`): `q` from Baptiste Moreau's profile
+(opened with `2`, `j`, `v`, showing `Ignore   Accept`), and a temporarily
+injected panic fired by a key on Maren Holt's profile, after `j`. Each time
+`stty -a` matched its output from before launch, `#{alternate_on}` was 0
+and `#{cursor_flag}` 1, and after the panic its message was printed on the
+normal screen. The injected panic was then removed.
+
 ## Testing
 
-147 unit tests, run with `cargo test` (about 20 s):
+173 unit tests, run with `cargo test` (about 20 s):
 
-- **`app.rs`** (75), on the seed data:
+- **`app.rs`** (89), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -1075,22 +1285,89 @@ the alternate screen was off and the cursor was visible.
     runs at the end of every repost test (on every app in the ones that
     build several), after publishing in
     `reposts_keep_their_original_when_cards_go_in_above`, and in the id test.
-- **`ui.rs`** (72), rendering into a `TestBackend`:
+  - Profiles, with `world` (the snapshot plus the feed, every post's
+    reactions, like state and comments, jobs, invitations, suggestions,
+    connections, conversations and the three drafts) as the "nothing else
+    changed" check:
+    - Every entry point: `v` on the feed (Maren Holt, then Tobias
+      Ferreira-Lund), in the post view with the third comment selected (the
+      post's author, the comment still selected), on invitations and
+      suggestions with `v` and with `Enter`, and on Messaging (the
+      conversation under the cursor, with another thread open, which stays
+      open and nothing is marked read). Opening changes nothing in `world`.
+      `v` on Jobs and Notifications changes nothing and toasts nothing.
+    - On a repost card, from the feed and from its post view, `v` opens the
+      original's author; on a repost of your own post, your profile.
+    - Esc puts back exactly the `world` it was opened from, after `j`, `k`,
+      an unknown key and a search opened, typed and closed (which returns
+      to the profile): from the feed, the post view (third comment), a
+      repost card, My Network and Messaging with an open thread.
+    - On a profile `l`, `r`, `s`, `p`, `c`, `x`, `a`, `e`, `v`, `J`, `K` and
+      Backspace on a connection's profile change nothing and toast nothing.
+      Ctrl-C and `q` quit.
+    - `1`-`5`, `Tab` and `BackTab` close it, landing in Browse on the new
+      tab, and `1` then shows the feed on the same post. A search jump from
+      a profile goes to the result and closes it.
+    - Accepting Baptiste Moreau on his profile: "Invitation accepted",
+      313 connections, badge 2, the profile still open, now `1st` with no
+      action; then `a`, `x`, `c` and `m` do nothing. After Esc, `world`
+      equals `a` on his row in My Network, selection included. Ignoring
+      Noor Haddad: "Invitation ignored", 312, `2nd`, no action, and a second
+      `a` does nothing.
+    - With no suggestions, `a` and `x` on the last invitation's profile
+      clamp `network_sel` to 1 at once, and after Esc `world` equals the
+      same key on the row. With suggestions, the first one slides under the
+      cursor.
+    - `c` on Amara Lindgren's profile: "Invitation sent", pending, still
+      `2nd`, then "Invitation withdrawn". `a`, `x` and `m` on a suggestion,
+      `c` on an invitation and `a`, `x`, `c` on a connection do nothing.
+    - `m` on Ravi Tenorio's profile from the feed: Messaging, `chat_sel` and
+      `open_chat` 1, read, badge 1, `Reply`, the stale draft cleared, and
+      `world` equal to `Enter` on him in Messaging. From Messaging it opens
+      Felix Abernathy's thread over Maren Holt's. On Tobias Ferreira-Lund
+      (a connection without a conversation) and Saoirse Kimura it does
+      nothing.
+    - `Enter` on Activity: from Messaging, Ines Okonkwo's post opens in the
+      post view on card 2 with comment 0, Esc returns to the feed on it, and
+      it lands exactly where search's jump to her post's comment lands. With
+      Hana Sorensen's post reposted, `Enter` from the repost's profile lands
+      on her own card (6). With no Activity it does nothing.
+    - Your own profile after publishing two posts: Activity `[0, 1]`, newest
+      first, no degree, no action, no member; `j`/`↓` stop at 1, `k`/`↑` at
+      0; `a`, `x`, `c` and `m` do nothing; `Enter` on the older post opens
+      it. Seed authors have one post each, invitations none.
+    - `v` and `m` are typed in the composer, the comment box, the reply box,
+      search on every tab, over the post view and over a profile, and the
+      Send picker from the feed and the post view, and open nothing.
+    - One profile per person, with the headline shown everywhere: every
+      post author, commenter, invitation, suggestion and conversation (you
+      excepted, whose headline is the profile's) has exactly one member,
+      with the same headline; every member is someone the app shows, there
+      are 16, the first role is `title at company` of the headline and
+      `present`, there is an earlier role, a `City, Region` location and an
+      About of more than one sentence. Invitations' and suggestions'
+      `mutual` match their member's and they are `2nd`; post authors and
+      conversation partners are `1st`.
+- **`ui.rs`** (84), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 24 states:
+  - Every size from 1×1 to 140×40 renders without panicking, for 33 states:
     Home, Home with two reposts around a published post (Maren Holt's
     repost selected), post view, the post view of a repost, comment box (empty and with text), post view after
     commenting, composer (empty and with text), My Network (invitation and
     suggestion selected), Jobs (with and without a toast, scrolled two lines,
     and scrolled past the end so it draws as the bottom at every size), Messaging, reply
     box, Notifications, search (with matches, empty, no match, and over
-    the post view), and the Send picker (from the feed, and with `o` over the
-    post view). One thread per state.
+    the post view), the Send picker (from the feed, and with `o` over the
+    post view), and profiles: Maren Holt's from the feed, Tobias
+    Ferreira-Lund's from the post view, an invitation's, an accepted
+    invitation's, a suggestion's (connect and pending), Ines Okonkwo's from
+    Messaging, yours with two posts, and search over a profile. One thread
+    per state.
   - Card counts and `Like` → `Liked`. A published post renders first with
     `now`. The post view shows the full body and comments.
   - Reposts at 120×30: after `r` on Maren Holt's post the first card is
@@ -1164,10 +1441,12 @@ the alternate screen was off and the cursor was visible.
     details scrolled as without.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
-  - Each of the eleven hint sets is at most 80 columns, and is what the footer
-    shows at 80×24. The post view footer reads exactly
-    `j/k comments  l like  c comment  x delete  r repost  s send  esc back  q quit`
-    (79 columns with the padding) and the
+  - Every state's hint set is at most 80 columns, and is what the footer
+    shows at 80×24. `every_state` holds 19 different sets: the 11 base
+    footers (the post view with someone else's comment selected), the post
+    view with your comment, and 7 profile footers. The post view footer reads exactly
+    `j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit`
+    (80 columns with the padding) and the
     comment box's `type write  backspace delete  enter post  esc cancel`.
     Those hints and every comment box label are single width.
   - Comment box states, at 120×30, 80×24 and 60×20: `Press c to comment`
@@ -1301,6 +1580,65 @@ the alternate screen was off and the cursor was visible.
     140×40: every row of the box starts and ends with its border and is
     exactly its width by display width. At 120×30 `終了` shows both excerpts
     with the match bold. The new labels are single width.
+  - Profiles at 120×30: Maren Holt's top card reads `Maren Holt · 1st` with
+    `Message` (on blue) on the right, the headline and `Lisbon, Portugal ·
+    38 mutual connections`; About's first row; Experience's four lines;
+    Activity's first line and `342 reactions · 3 comments` with the bar and
+    background on the selected post, Activity's border light blue and the
+    top card's gray; the header still shows `1 Home`.
+  - The action follows the person: `Ignore   Accept` and `No recent posts`
+    for Baptiste Moreau, then `1st` and no button after `a`; `2nd` and no
+    button after `x` on Noor Haddad; `+ Connect`, `◷ Pending`, `+ Connect`
+    for Amara Lindgren with `c` and `cc`; nothing for Tobias Ferreira-Lund.
+  - Your profile: `Jordan Vale` with no degree, your headline,
+    `312 connections` (313 after accepting), no About, Experience or
+    button, and Activity newest first, the bar following `j`.
+  - Live counts: after a like and a comment, Maren Holt's Activity shows
+    `343 reactions · 4 comments`.
+  - At 80×24 every one of the 16 members' profiles shows all four cards and
+    its headline.
+  - Short screens: an invitation's profile drops About at 60×20 and
+    Experience too at 30×16, and at every height from 4 to 40 the top card
+    is first at the top of the body. With four posts by Maren Holt at 80×24,
+    all four cards still show and `j` three times brings the fourth into
+    Activity's rows. With twelve posts of yours at 80×24 and the last
+    selected, it is on screen and so is your name.
+  - The top card at 38 columns keeps `Theo Vasquez-Hart · 2nd  + Connect` on
+    one row; at 37 `+ Connect` moves to a row of its own; at 20 the name is
+    cut and the degree kept: `│ Theo Vasq… · 2nd │`.
+  - Every profile state from `every_state`, your profile with a published
+    post of wide text, and three My Network profiles, at every size from
+    1×1 to 140×40: every card `profile_cards` lays out is inside the body,
+    and every card at least 2×2 has every row starting and ending with its
+    border and exactly the card's width, by display width. The wide post's
+    Activity line is cut with `…` to within one column of its row at 60×20.
+  - The footers read exactly as listed under "Layout" for Home, the post
+    view, My Network and Messaging, and for profiles of an invitation, a
+    suggestion (connect and withdraw), Maren Holt and you, at 80×24. Home
+    is 75 columns, the post view and My Network exactly 80. The hints and
+    every profile label are single width, and so is every member string in
+    the seed check.
+  - Profile footers, exhaustively: for an invitation, a suggestion (connect
+    and pending), a connection with a conversation, one without, an
+    accepted and an ignored invitation, and you, each with 0, 1 and 2 posts
+    (`profile_with_posts` gives them seed posts), the footer is exactly
+    `[j/k posts  ][enter open  ][action  ]esc back  1-5 tabs  q quit`, with
+    `j/k posts` only at 2 and `enter open` from 1. None is wider than 71,
+    and an invitation with two posts is exactly 71.
+  - The post view footer: on Maren Holt's post, `r repost` with a seed
+    comment selected, `x delete` in its place (80 columns) once your comment
+    is posted and selected, `r repost` again after `k` and after deleting it.
+    On Lucia Brandt's post, no `j/k comments` with no comments or only your
+    one, and `x delete` for yours, in the original's post view and in the
+    post view of its repost.
+  - Every key a footer names does something, and the ones a profile footer
+    leaves out do nothing (`every_key_a_footer_names_does_something`). For
+    14 states (profiles of every kind with 0, 1, 2 or 3 posts, and post
+    views with and without your comment and with no comments), each hinted
+    key (for `j/k`, `j` or `k`; for `1-5`, one of the digits) changes the
+    120×30 screen or quits. Each of `j`, `k`, `Enter`, `a`, `x`, `c` and `m`
+    whose hint is absent from a profile footer changes nothing, and neither
+    do `j`, `k` and `x` when the post view leaves them out.
 
 These were checked by breaking the code on purpose and restoring it:
 case-sensitive matching fails 8 tests (including the `BRIGHT` one), taking
@@ -1435,6 +1773,47 @@ published post `PostId(0)` fails 6, including `post_ids_are_unique` and
 without its card fails 13, including `post_ids_are_unique` (through
 `assert_feed_matches_posts`) and every test built on `every_state`.
 
+For profile pages, each break was caught and then restored: making `Esc`
+on a profile also drop to Browse fails
+`esc_returns_to_exactly_where_the_profile_was_opened`; not setting
+`connected` on accept fails `accepting_on_a_profile_makes_them_first_degree`
+and `the_action_follows_the_person`; listing Activity oldest first fails 3
+(`your_own_profile_lists_your_posts_newest_first`,
+`your_own_profile_shows_your_connections_and_posts` and
+`short_screens_drop_about_then_experience_but_keep_the_selection`); landing
+`go_to_post` on `post_sel = i` instead of the post's own card fails
+`enter_on_activity_opens_the_post_on_its_own_card` and
+`search_finds_a_reposted_post_once_and_lands_on_the_original`; letting
+`set_tab` keep the profile open fails 4, including
+`switching_tabs_closes_the_profile` and
+`m_opens_the_conversation_like_messaging_does`; dropping the clamp from
+`act_on_network_item` fails `removal_keeps_selection_in_bounds` and
+`removing_the_last_row_from_a_profile_clamps_the_selection`; leaving
+`open_conversation` out of `go_to_conversation` fails 3, including
+`m_opens_the_conversation_like_messaging_does`; making `v` in the post view
+open the selected comment's author fails 4, including
+`v_opens_the_profile_under_the_selection_everywhere`; cutting the Activity
+line by `char` count fails `profiles_stay_inside_their_borders_at_every_size`;
+always putting the action beside the name fails
+`a_narrow_top_card_puts_the_action_on_its_own_row`; and letting Activity
+claim its whole height instead of `ACTIVITY_MIN_HEIGHT` fails
+`short_screens_drop_about_then_experience_but_keep_the_selection`. That last
+break first passed every test, since no seed member has more than one post;
+the test now gives Maren Holt four posts to catch it.
+
+For the footers that follow the state, each break was caught and then
+restored. Showing `j/k posts` with one post, or `enter open` with none,
+fails 4 each (`profile_footers_name_only_what_works`,
+`profile_hints_and_labels`, `every_key_a_footer_names_does_something` and
+`every_hint_set_fits_80_columns`). Never showing `x delete`, or showing it
+beside `r repost` instead of in its place (90 columns), fails
+`the_post_view_footer_names_x_delete_only_for_your_comment` and
+`every_hint_set_fits_80_columns`. Always showing `j/k comments` fails
+`the_post_view_footer_names_x_delete_only_for_your_comment` and
+`every_key_a_footer_names_does_something`. Making `is_yours` true for any
+post holding a comment of yours fails
+`the_post_view_footer_names_x_delete_only_for_your_comment`.
+
 ## Ideas
 
-Profile pages, mouse support.
+Mouse support.

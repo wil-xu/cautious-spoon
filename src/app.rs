@@ -6,6 +6,7 @@ use crate::data;
 use crate::data::Comment;
 use crate::data::Conversation;
 use crate::data::Job;
+use crate::data::Member;
 use crate::data::Message;
 use crate::data::News;
 use crate::data::Notification;
@@ -179,6 +180,43 @@ pub(crate) struct Card {
     pub repost: bool,
 }
 
+/// How far someone is from you in your network, as a profile shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Degree {
+    First,
+    Second,
+}
+
+impl Degree {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Degree::First => "1st",
+            Degree::Second => "2nd",
+        }
+    }
+}
+
+/// The action a profile's top card offers, from the current state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileAction {
+    /// Their pending invitation, `invitations[i]`: Accept / Ignore.
+    Invitation(usize),
+    /// `suggestions[i]`: + Connect, or Pending once you've sent one.
+    Suggestion(usize),
+    /// Your conversation with them, `conversations[i]`: Message.
+    Message(usize),
+}
+
+/// A profile page, open over whatever tab and mode it was opened from. Like
+/// search, it leaves those untouched underneath, so Esc puts everything back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProfilePage {
+    /// Whose profile: a member's name, or your own.
+    pub name: &'static str,
+    /// The selected Activity post, an index into `App::activity(name)`.
+    pub post: usize,
+}
+
 /// The selected row on My Network, which spans both sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkItem {
@@ -199,6 +237,8 @@ pub(crate) struct App {
     pub jobs: Vec<Job>,
     pub conversations: Vec<Conversation>,
     pub notifications: Vec<Notification>,
+    /// One profile per person other than you, by name.
+    pub members: Vec<Member>,
     pub tab: Tab,
     pub mode: Mode,
     /// Index into `feed`.
@@ -225,6 +265,8 @@ pub(crate) struct App {
     pub search: Option<Search>,
     /// `Some` while the Send picker is open. Takes every key but Ctrl-C.
     pub send: Option<SendPicker>,
+    /// `Some` while a profile page is open over the current tab and mode.
+    pub profile_page: Option<ProfilePage>,
     pub status: Option<&'static str>,
     pub should_quit: bool,
 }
@@ -263,6 +305,7 @@ impl App {
             jobs: data::jobs(),
             conversations: data::conversations(),
             notifications: data::notifications(),
+            members: data::members(),
             tab: Tab::Home,
             mode: Mode::Browse,
             post_sel: 0,
@@ -278,6 +321,7 @@ impl App {
             comment_draft: String::new(),
             search: None,
             send: None,
+            profile_page: None,
             status: None,
             should_quit: false,
         }
@@ -322,6 +366,14 @@ impl App {
         self.posts.iter_mut().find(|p| p.id == id)
     }
 
+    /// Whether comment `index` of the selected post is yours, so `x` in the
+    /// post view deletes it (and its footer says so).
+    pub(crate) fn is_yours(&self, index: usize) -> bool {
+        self.selected_post()
+            .and_then(|p| p.comments.get(index))
+            .is_some_and(|c| c.author == self.profile.name)
+    }
+
     /// Whether you've reposted post `id`. Computed from the feed, never stored.
     pub(crate) fn reposted(&self, id: PostId) -> bool {
         self.feed.contains(&Card {
@@ -350,6 +402,59 @@ impl App {
             Some(NetworkItem::Suggestion(i - n))
         } else {
             None
+        }
+    }
+
+    /// The profile of `name`, someone other than you.
+    pub(crate) fn member(&self, name: &str) -> Option<&Member> {
+        self.members.iter().find(|m| m.name == name)
+    }
+
+    /// `name`'s posts, newest first, as indexes into `posts`.
+    pub(crate) fn activity(&self, name: &str) -> Vec<usize> {
+        (0..self.posts.len())
+            .filter(|&i| self.posts[i].author == name)
+            .collect()
+    }
+
+    /// `name`'s degree, from whether they are your connection now. `None` for
+    /// you.
+    pub(crate) fn degree(&self, name: &str) -> Option<Degree> {
+        let member = self.member(name)?;
+        Some(if member.connected {
+            Degree::First
+        } else {
+            Degree::Second
+        })
+    }
+
+    /// `name`'s pending invitation or suggestion on My Network, if any.
+    fn network_item_of(&self, name: &str) -> Option<NetworkItem> {
+        if let Some(i) = self.invitations.iter().position(|p| p.name == name) {
+            return Some(NetworkItem::Invitation(i));
+        }
+        let i = self
+            .suggestions
+            .iter()
+            .position(|s| s.person.name == name)?;
+        Some(NetworkItem::Suggestion(i))
+    }
+
+    /// Your conversation with `name`, as an index into `conversations`.
+    fn conversation_of(&self, name: &str) -> Option<usize> {
+        self.conversations.iter().position(|c| c.name == name)
+    }
+
+    /// What `name`'s top card offers: their invitation, the suggestion to
+    /// connect, or your conversation. Nothing for you.
+    pub(crate) fn profile_action(&self, name: &str) -> Option<ProfileAction> {
+        if name == self.profile.name {
+            return None;
+        }
+        match self.network_item_of(name) {
+            Some(NetworkItem::Invitation(i)) => Some(ProfileAction::Invitation(i)),
+            Some(NetworkItem::Suggestion(i)) => Some(ProfileAction::Suggestion(i)),
+            None => self.conversation_of(name).map(ProfileAction::Message),
         }
     }
 
@@ -422,7 +527,7 @@ impl App {
         self.invitations.len() + self.suggestions.len()
     }
 
-    /// Switching tabs closes any overlay. Opening Notifications marks them all
+    /// Switching tabs closes the post view and the profile page. Opening Notifications marks them all
     /// read, which clears the badge, but the ones that were unread stay marked
     /// as new until you leave the tab.
     fn set_tab(&mut self, tab: Tab) {
@@ -430,6 +535,7 @@ impl App {
         let leaving = self.tab == Tab::Notifications && tab != Tab::Notifications;
         self.tab = tab;
         self.mode = Mode::Browse;
+        self.profile_page = None;
         for n in &mut self.notifications {
             if entering {
                 n.is_new = n.unread;
@@ -480,6 +586,10 @@ impl App {
         }
         if self.send.is_some() {
             self.on_send_key(key);
+            return;
+        }
+        if self.profile_page.is_some() {
+            self.on_profile_key(key.code);
             return;
         }
         match self.mode {
@@ -547,20 +657,73 @@ impl App {
                 self.job_sel = i;
                 self.job_scroll = 0;
             }
-            SearchHit::Post(i) => {
-                self.set_tab(Tab::Home);
-                self.post_sel = self.card_of(i).unwrap_or(self.post_sel);
-            }
+            SearchHit::Post(i) => self.go_to_post(i, Mode::Browse),
             SearchHit::Comment { post, comment } => {
-                self.set_tab(Tab::Home);
-                self.post_sel = self.card_of(post).unwrap_or(self.post_sel);
-                self.mode = Mode::PostDetail { comment };
+                self.go_to_post(post, Mode::PostDetail { comment });
             }
-            SearchHit::Conversation { chat, .. } => {
-                self.set_tab(Tab::Messaging);
-                self.chat_sel = chat;
-                self.open_conversation();
+            SearchHit::Conversation { chat, .. } => self.go_to_conversation(chat),
+        }
+    }
+
+    /// Home, on post `posts[i]`'s own card (never a repost of it), in `mode`.
+    fn go_to_post(&mut self, i: usize, mode: Mode) {
+        self.set_tab(Tab::Home);
+        self.post_sel = self.card_of(i).unwrap_or(self.post_sel);
+        self.mode = mode;
+    }
+
+    /// Messaging, with conversation `chat` opened as Enter on it opens it.
+    fn go_to_conversation(&mut self, chat: usize) {
+        self.set_tab(Tab::Messaging);
+        self.chat_sel = chat;
+        self.open_conversation();
+    }
+
+    /// Opens `name`'s profile page over the current tab and mode, with its
+    /// first Activity post selected.
+    fn open_profile(&mut self, name: &'static str) {
+        if name == self.profile.name || self.member(name).is_some() {
+            self.profile_page = Some(ProfilePage { name, post: 0 });
+        }
+    }
+
+    /// Keys on a profile page. Like the browse keys, except that `j`/`k` move
+    /// through Activity, and `a`, `x`, `c` and `m` act on the person.
+    fn on_profile_key(&mut self, code: KeyCode) {
+        let Some(page) = self.profile_page else {
+            return;
+        };
+        let posts = self.activity(page.name);
+        let mut step = |delta: isize| {
+            let post = page
+                .post
+                .saturating_add_signed(delta)
+                .min(posts.len().saturating_sub(1));
+            self.profile_page = Some(ProfilePage { post, ..page });
+        };
+        match code {
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char(ch @ '1'..='5') => self.set_tab(Tab::ALL[usize::from(ch as u8 - b'1')]),
+            KeyCode::Tab => self.set_tab(self.tab.cycle(true)),
+            KeyCode::BackTab => self.set_tab(self.tab.cycle(false)),
+            KeyCode::Char('j') | KeyCode::Down => step(1),
+            KeyCode::Char('k') | KeyCode::Up => step(-1),
+            KeyCode::Esc => self.profile_page = None,
+            KeyCode::Char('/') => self.search = Some(Search::default()),
+            KeyCode::Enter => {
+                if let Some(&i) = posts.get(page.post) {
+                    self.go_to_post(i, Mode::PostDetail { comment: 0 });
+                }
             }
+            KeyCode::Char('a' | 'x' | 'c') => {
+                self.act_on_network_item(code, self.network_item_of(page.name));
+            }
+            KeyCode::Char('m') => {
+                if let Some(chat) = self.conversation_of(page.name) {
+                    self.go_to_conversation(chat);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -595,6 +758,11 @@ impl App {
                 }
             }
             KeyCode::Char('r') => self.repost(),
+            KeyCode::Char('v') => {
+                if let Some(author) = self.selected_post().map(|p| p.author) {
+                    self.open_profile(author);
+                }
+            }
             _ => {}
         }
     }
@@ -667,13 +835,12 @@ impl App {
     /// the cursor, or the cursor moves up when the last one goes. Anyone
     /// else's comment, or no comment at all, is left alone without a toast.
     fn delete_comment(&mut self, index: usize) {
-        let me = self.profile.name;
+        if !self.is_yours(index) {
+            return;
+        }
         let Some(post) = self.selected_post_mut() else {
             return;
         };
-        if post.comments.get(index).is_none_or(|c| c.author != me) {
-            return;
-        }
         post.comments.remove(index);
         self.mode = Mode::PostDetail {
             comment: index.min(post.comments.len().saturating_sub(1)),
@@ -788,9 +955,28 @@ impl App {
     fn on_network_key(&mut self, code: KeyCode) {
         let item = self.network_item();
         match (code, item) {
+            (KeyCode::Char('v') | KeyCode::Enter, Some(NetworkItem::Invitation(i))) => {
+                self.open_profile(self.invitations[i].name);
+            }
+            (KeyCode::Char('v') | KeyCode::Enter, Some(NetworkItem::Suggestion(i))) => {
+                self.open_profile(self.suggestions[i].person.name);
+            }
+            _ => self.act_on_network_item(code, item),
+        }
+    }
+
+    /// `a`, `x` or `c` on `item`, from My Network or the person's profile:
+    /// accept or ignore an invitation, or connect to or withdraw from a
+    /// suggestion. Anything else on either does nothing. Afterwards the My
+    /// Network selection is clamped to the list.
+    fn act_on_network_item(&mut self, code: KeyCode, item: Option<NetworkItem>) {
+        match (code, item) {
             (KeyCode::Char('a'), Some(NetworkItem::Invitation(i))) => {
-                self.invitations.remove(i);
+                let person = self.invitations.remove(i);
                 self.profile.connections += 1;
+                if let Some(m) = self.members.iter_mut().find(|m| m.name == person.name) {
+                    m.connected = true;
+                }
                 self.status = Some("Invitation accepted");
             }
             (KeyCode::Char('x'), Some(NetworkItem::Invitation(i))) => {
@@ -837,8 +1023,14 @@ impl App {
     }
 
     fn on_messaging_key(&mut self, code: KeyCode) {
-        if code == KeyCode::Enter {
-            self.open_conversation();
+        match code {
+            KeyCode::Enter => self.open_conversation(),
+            KeyCode::Char('v') => {
+                if let Some(name) = self.conversations.get(self.chat_sel).map(|c| c.name) {
+                    self.open_profile(name);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3562,5 +3754,720 @@ mod tests {
         assert_eq!((app.reply.as_str(), app.mode), ("r", Mode::Reply));
         assert!(!reposted(&app));
         assert_feed_matches_posts(&app);
+    }
+
+    // ------------------------------------------------------------ Profiles
+
+    /// Whose profile is open, if any.
+    fn viewing(app: &App) -> Option<&'static str> {
+        app.profile_page.map(|p| p.name)
+    }
+
+    /// Everything a profile must not touch underneath, besides `snapshot`:
+    /// the feed, every post's reactions, like state and comments, jobs,
+    /// invitations, suggestions, connections, conversations and drafts.
+    type World = (
+        Snapshot,
+        Vec<Card>,
+        Vec<(u32, bool, usize)>,
+        Vec<(bool, bool)>,
+        Vec<&'static str>,
+        Vec<bool>,
+        u32,
+        Vec<(bool, usize)>,
+        [String; 3],
+    );
+
+    fn world(app: &App) -> World {
+        (
+            snapshot(app),
+            app.feed.clone(),
+            app.posts
+                .iter()
+                .map(|p| (p.reactions, p.liked, p.comments.len()))
+                .collect(),
+            app.jobs.iter().map(|j| (j.saved, j.applied)).collect(),
+            app.invitations.iter().map(|p| p.name).collect(),
+            app.suggestions.iter().map(|s| s.pending).collect(),
+            app.profile.connections,
+            app.conversations
+                .iter()
+                .map(|c| (c.unread, c.messages.len()))
+                .collect(),
+            [
+                app.draft.clone(),
+                app.reply.clone(),
+                app.comment_draft.clone(),
+            ],
+        )
+    }
+
+    /// Opens My Network with row `row` selected, then the profile with `v`.
+    fn network_profile(row: usize) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('2'));
+        for _ in 0..row {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('v'));
+        app
+    }
+
+    #[test]
+    fn v_opens_the_profile_under_the_selection_everywhere() {
+        // Home feed: the selected post's author, with nothing else changed.
+        let mut app = App::new();
+        let before = world(&app);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Maren Holt"));
+        assert_eq!(app.profile_page.map(|p| p.post), Some(0));
+        assert_eq!(world(&app), before, "the profile sits on top");
+        assert!(app.status.is_none());
+
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Tobias Ferreira-Lund"));
+
+        // The post view: the post's author, whichever comment is selected.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        let before = world(&app);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Maren Holt"));
+        assert_eq!(world(&app), before);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 2 });
+
+        // My Network: invitations and suggestions, with `v` and with Enter.
+        for (row, name) in [
+            (0, "Noor Haddad"),
+            (2, "Yuki Tanabe"),
+            (3, "Amara Lindgren"),
+            (6, "Mateo Achebe"),
+        ] {
+            let app = network_profile(row);
+            assert_eq!(viewing(&app), Some(name), "v on row {row}");
+            assert_eq!(app.network_sel, row);
+
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char('2'));
+            for _ in 0..row {
+                press(&mut app, KeyCode::Char('j'));
+            }
+            let before = world(&app);
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(viewing(&app), Some(name), "Enter on row {row}");
+            assert_eq!(world(&app), before);
+        }
+
+        // Messaging: the selected conversation's person, not the open one.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        let before = world(&app);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Ines Okonkwo"));
+        assert_eq!(world(&app), before, "nothing is opened or marked read");
+        assert_eq!(app.open_chat, Some(0));
+
+        // Jobs and Notifications: nothing.
+        for tab in ['3', '5'] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(tab));
+            let before = world(&app);
+            press(&mut app, KeyCode::Char('v'));
+            assert_eq!(viewing(&app), None, "tab {tab}");
+            assert_eq!(world(&app), before, "tab {tab}");
+            assert!(app.status.is_none());
+        }
+    }
+
+    #[test]
+    fn v_on_a_repost_card_opens_the_originals_author() {
+        let mut app = App::new();
+        select_card(&mut app, "Tobias Ferreira-Lund", false);
+        press(&mut app, KeyCode::Char('r'));
+        select_card(&mut app, "Tobias Ferreira-Lund", true);
+        assert_eq!(app.post_sel, 0);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Tobias Ferreira-Lund"));
+        assert_eq!(app.post_sel, 0, "still on the repost card");
+
+        // And from the repost's post view.
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Tobias Ferreira-Lund"));
+
+        // A repost of your own post opens your profile.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "hello");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('r'));
+        assert!(app.feed[0].repost);
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Jordan Vale"));
+        assert_feed_matches_posts(&app);
+    }
+
+    #[test]
+    fn esc_returns_to_exactly_where_the_profile_was_opened() {
+        let mut thread = App::new();
+        press(&mut thread, KeyCode::Char('4'));
+        press(&mut thread, KeyCode::Char('j'));
+        press(&mut thread, KeyCode::Enter);
+        press(&mut thread, KeyCode::Esc);
+        let mut reposted = App::new();
+        press(&mut reposted, KeyCode::Char('r'));
+        press(&mut reposted, KeyCode::Char('k'));
+        let mut detail = maren_post_view();
+        press(&mut detail, KeyCode::Char('j'));
+        press(&mut detail, KeyCode::Char('j'));
+        let mut feed = App::new();
+        for _ in 0..3 {
+            press(&mut feed, KeyCode::Char('j'));
+        }
+        for (name, mut app) in [
+            ("feed", feed),
+            ("post view", detail),
+            ("repost", reposted),
+            ("network", network_profile(4)),
+            ("messaging", thread),
+        ] {
+            if app.profile_page.is_some() {
+                press(&mut app, KeyCode::Esc);
+            }
+            let before = world(&app);
+            press(&mut app, KeyCode::Char('v'));
+            assert!(app.profile_page.is_some(), "{name}");
+            // Moving through Activity, an unknown key and a search opened and
+            // closed again change nothing underneath.
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Char('z'));
+            press(&mut app, KeyCode::Char('/'));
+            type_str(&mut app, "bright");
+            press(&mut app, KeyCode::Esc);
+            assert!(app.search.is_none(), "{name}");
+            assert!(app.profile_page.is_some(), "{name}: back to the profile");
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(viewing(&app), None, "{name}");
+            assert_eq!(world(&app), before, "{name}");
+            assert!(!app.should_quit, "{name}");
+        }
+    }
+
+    #[test]
+    fn keys_on_a_profile_dont_act_on_the_tab_below() {
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('v'));
+        let before = world(&app);
+        for code in [
+            KeyCode::Char('l'),
+            KeyCode::Char('r'),
+            KeyCode::Char('s'),
+            KeyCode::Char('p'),
+            KeyCode::Char('c'),
+            KeyCode::Char('x'),
+            KeyCode::Char('a'),
+            KeyCode::Char('e'),
+            KeyCode::Char('v'),
+            KeyCode::Char('J'),
+            KeyCode::Char('K'),
+            KeyCode::Backspace,
+        ] {
+            press(&mut app, code);
+            assert_eq!(world(&app), before, "{code:?}");
+            assert_eq!(viewing(&app), Some("Maren Holt"), "{code:?}");
+            assert!(app.send.is_none() && app.status.is_none(), "{code:?}");
+        }
+
+        // Ctrl-C quits from a profile, and so does q.
+        let mut app = network_profile(0);
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit);
+        let mut app = network_profile(0);
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn switching_tabs_closes_the_profile() {
+        for (code, tab) in [
+            (KeyCode::Char('1'), Tab::Home),
+            (KeyCode::Char('2'), Tab::Network),
+            (KeyCode::Char('3'), Tab::Jobs),
+            (KeyCode::Char('4'), Tab::Messaging),
+            (KeyCode::Char('5'), Tab::Notifications),
+            (KeyCode::Tab, Tab::Network),
+            (KeyCode::BackTab, Tab::Notifications),
+        ] {
+            let mut app = maren_post_view();
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Char('v'));
+            press(&mut app, code);
+            assert_eq!(viewing(&app), None, "{code:?}");
+            assert_eq!((app.tab, app.mode), (tab, Mode::Browse), "{code:?}");
+            assert_eq!(app.post_sel, 0, "{code:?}");
+            // Coming back to Home shows the feed on the same post.
+            press(&mut app, KeyCode::Char('1'));
+            assert_eq!((app.mode, app.post_sel), (Mode::Browse, 0), "{code:?}");
+            assert_eq!(viewing(&app), None, "{code:?}");
+        }
+
+        // A search jump from a profile goes where it points and closes it.
+        let mut app = network_profile(0);
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "lisbon");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!((app.tab, app.job_sel), (Tab::Jobs, 0));
+        assert_eq!(viewing(&app), None);
+    }
+
+    #[test]
+    fn accepting_on_a_profile_makes_them_first_degree() {
+        let mut app = network_profile(1);
+        assert_eq!(viewing(&app), Some("Baptiste Moreau"));
+        assert_eq!(app.degree("Baptiste Moreau"), Some(Degree::Second));
+        assert_eq!(
+            app.profile_action("Baptiste Moreau"),
+            Some(ProfileAction::Invitation(1))
+        );
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.status, Some("Invitation accepted"));
+        assert_eq!(app.profile.connections, 313);
+        assert_eq!(app.badge(Tab::Network), 2);
+        assert_eq!(viewing(&app), Some("Baptiste Moreau"), "the profile stays");
+        assert_eq!(app.degree("Baptiste Moreau"), Some(Degree::First));
+        assert_eq!(app.profile_action("Baptiste Moreau"), None);
+
+        // No longer an invitation: a, x and c do nothing, without a toast.
+        let after = world(&app);
+        for ch in ['a', 'x', 'c', 'm'] {
+            press(&mut app, KeyCode::Char(ch));
+            assert_eq!(world(&app), after, "{ch}");
+            assert!(app.status.is_none(), "{ch}");
+            assert_eq!(viewing(&app), Some("Baptiste Moreau"));
+        }
+
+        // The same as `a` on the row in My Network, selection included.
+        press(&mut app, KeyCode::Esc);
+        let mut by_hand = App::new();
+        press(&mut by_hand, KeyCode::Char('2'));
+        press(&mut by_hand, KeyCode::Char('j'));
+        press(&mut by_hand, KeyCode::Char('a'));
+        by_hand.status = None;
+        assert_eq!(world(&app), world(&by_hand));
+        assert_eq!(app.network_item(), Some(NetworkItem::Invitation(1)));
+        assert_eq!(app.invitations[1].name, "Yuki Tanabe");
+    }
+
+    #[test]
+    fn ignoring_on_a_profile_leaves_them_second_degree() {
+        let mut app = network_profile(0);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.status, Some("Invitation ignored"));
+        assert_eq!(app.profile.connections, 312);
+        assert_eq!(app.badge(Tab::Network), 2);
+        assert_eq!(viewing(&app), Some("Noor Haddad"));
+        assert_eq!(app.degree("Noor Haddad"), Some(Degree::Second));
+        assert_eq!(app.profile_action("Noor Haddad"), None);
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.profile.connections, 312, "nothing left to accept");
+        assert!(app.status.is_none());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!((app.tab, app.mode), (Tab::Network, Mode::Browse));
+        assert_eq!(app.network_item(), Some(NetworkItem::Invitation(0)));
+        assert_eq!(app.invitations[0].name, "Baptiste Moreau");
+    }
+
+    #[test]
+    fn removing_the_last_row_from_a_profile_clamps_the_selection() {
+        // As on the list: with no suggestions, the cursor moves up.
+        for key in ['a', 'x'] {
+            let mut app = App::new();
+            app.suggestions.clear();
+            press(&mut app, KeyCode::Char('2'));
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Char('v'));
+            assert_eq!(viewing(&app), Some("Yuki Tanabe"));
+            press(&mut app, KeyCode::Char(key));
+            assert_eq!(app.network_sel, 1, "{key}: clamped at once");
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(
+                app.network_item(),
+                Some(NetworkItem::Invitation(1)),
+                "{key}"
+            );
+
+            let mut by_hand = App::new();
+            by_hand.suggestions.clear();
+            press(&mut by_hand, KeyCode::Char('2'));
+            press(&mut by_hand, KeyCode::Char('j'));
+            press(&mut by_hand, KeyCode::Char('j'));
+            press(&mut by_hand, KeyCode::Char(key));
+            by_hand.status = None;
+            assert_eq!(world(&app), world(&by_hand), "{key}");
+        }
+
+        // With suggestions after it, the first suggestion slides under it.
+        let mut app = network_profile(2);
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.network_item(), Some(NetworkItem::Suggestion(0)));
+    }
+
+    #[test]
+    fn c_on_a_suggestions_profile_connects_and_withdraws() {
+        let mut app = network_profile(3);
+        assert_eq!(viewing(&app), Some("Amara Lindgren"));
+        assert_eq!(
+            app.profile_action("Amara Lindgren"),
+            Some(ProfileAction::Suggestion(0))
+        );
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.status, Some("Invitation sent"));
+        assert!(app.suggestions[0].pending);
+        assert_eq!(viewing(&app), Some("Amara Lindgren"));
+        assert_eq!(app.degree("Amara Lindgren"), Some(Degree::Second));
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.status, Some("Invitation withdrawn"));
+        assert!(!app.suggestions[0].pending);
+
+        // a and x on a suggestion, and c on an invitation, do nothing.
+        let before = world(&app);
+        for ch in ['a', 'x', 'm'] {
+            press(&mut app, KeyCode::Char(ch));
+            assert_eq!(world(&app), before, "{ch}");
+            assert!(app.status.is_none(), "{ch}");
+        }
+        let mut app = network_profile(0);
+        let before = world(&app);
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(world(&app), before);
+        assert!(app.status.is_none());
+
+        // On a connection's profile none of them do anything.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('v'));
+        let before = world(&app);
+        for ch in ['a', 'x', 'c'] {
+            press(&mut app, KeyCode::Char(ch));
+            assert_eq!(world(&app), before, "{ch}");
+            assert!(app.status.is_none(), "{ch}");
+            assert_eq!(viewing(&app), Some("Maren Holt"));
+        }
+    }
+
+    #[test]
+    fn m_opens_the_conversation_like_messaging_does() {
+        let mut app = App::new();
+        app.reply = "a stale draft".to_owned();
+        select_card(&mut app, "Ravi Tenorio", false);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(
+            app.profile_action("Ravi Tenorio"),
+            Some(ProfileAction::Message(1))
+        );
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(viewing(&app), None);
+        assert_eq!((app.tab, app.mode), (Tab::Messaging, Mode::Reply));
+        assert_eq!((app.chat_sel, app.open_chat), (1, Some(1)));
+        assert!(!app.conversations[1].unread);
+        assert_eq!(app.badge(Tab::Messaging), 1);
+
+        let mut by_hand = App::new();
+        by_hand.reply = "a stale draft".to_owned();
+        select_card(&mut by_hand, "Ravi Tenorio", false);
+        press(&mut by_hand, KeyCode::Char('4'));
+        press(&mut by_hand, KeyCode::Char('j'));
+        press(&mut by_hand, KeyCode::Enter);
+        assert_eq!(world(&app), world(&by_hand));
+
+        // From Messaging, on someone else's thread.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!((app.chat_sel, app.open_chat), (3, Some(3)));
+        assert_eq!(app.mode, Mode::Reply);
+
+        // Without a conversation: nothing, the profile stays.
+        for (mut app, name) in [
+            {
+                let mut app = App::new();
+                press(&mut app, KeyCode::Char('j'));
+                press(&mut app, KeyCode::Char('v'));
+                (app, "Tobias Ferreira-Lund")
+            },
+            (network_profile(5), "Saoirse Kimura"),
+        ] {
+            assert_eq!(viewing(&app), Some(name));
+            let before = world(&app);
+            press(&mut app, KeyCode::Char('m'));
+            assert_eq!(world(&app), before, "{name}");
+            assert_eq!(viewing(&app), Some(name));
+            assert!(app.status.is_none());
+        }
+    }
+
+    #[test]
+    fn enter_on_activity_opens_the_post_on_its_own_card() {
+        // From Messaging: Ines Okonkwo's post, the third in the feed.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.activity("Ines Okonkwo"), [2]);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(viewing(&app), None);
+        assert_eq!(app.tab, Tab::Home);
+        assert_eq!(app.post_sel, 2);
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+        assert_eq!(app.selected_post().map(|p| p.author), Some("Ines Okonkwo"));
+        // Esc goes back to the feed on her post, as from a comment jump.
+        press(&mut app, KeyCode::Esc);
+        assert_eq!((app.mode, app.post_sel), (Mode::Browse, 2));
+
+        // The same route as search's comment jump to her post's comment.
+        let mut found = App::new();
+        press(&mut found, KeyCode::Char('4'));
+        press(&mut found, KeyCode::Char('/'));
+        type_str(&mut found, "canal view is a strong");
+        press(&mut found, KeyCode::Enter);
+        let mut via_profile = App::new();
+        press(&mut via_profile, KeyCode::Char('4'));
+        press(&mut via_profile, KeyCode::Char('j'));
+        press(&mut via_profile, KeyCode::Char('j'));
+        press(&mut via_profile, KeyCode::Char('v'));
+        press(&mut via_profile, KeyCode::Enter);
+        assert_eq!(snapshot(&found).0, snapshot(&via_profile).0);
+        assert_eq!(found.mode, via_profile.mode);
+        assert_eq!(found.post_sel, via_profile.post_sel);
+
+        // From a repost card: its post's own card, not the repost.
+        let mut app = App::new();
+        select_card(&mut app, "Hana Sorensen", false);
+        press(&mut app, KeyCode::Char('r'));
+        select_card(&mut app, "Hana Sorensen", true);
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.feed[app.post_sel].repost);
+        assert_eq!(app.post_sel, 6);
+        assert_eq!(app.selected_post().map(|p| p.author), Some("Hana Sorensen"));
+        assert_eq!(app.mode, Mode::PostDetail { comment: 0 });
+
+        // Enter with no Activity does nothing.
+        let mut app = network_profile(0);
+        let before = world(&app);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(world(&app), before);
+        assert_eq!(viewing(&app), Some("Noor Haddad"));
+    }
+
+    #[test]
+    fn your_own_profile_lists_your_posts_newest_first() {
+        let mut app = App::new();
+        for text in ["first post", "second post"] {
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, text);
+            press(&mut app, KeyCode::Enter);
+        }
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(viewing(&app), Some("Jordan Vale"));
+        assert_eq!(app.activity("Jordan Vale"), [0, 1]);
+        assert_eq!(app.posts[0].body, "second post");
+        assert_eq!(app.degree("Jordan Vale"), None);
+        assert_eq!(app.profile_action("Jordan Vale"), None);
+        assert!(app.member("Jordan Vale").is_none());
+
+        // j and k move through Activity and stop at both ends.
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.profile_page.map(|p| p.post), Some(1));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.profile_page.map(|p| p.post), Some(1));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.profile_page.map(|p| p.post), Some(0));
+        press(&mut app, KeyCode::Char('j'));
+
+        // a, x, c and m do nothing.
+        let before = world(&app);
+        for ch in ['a', 'x', 'c', 'm'] {
+            press(&mut app, KeyCode::Char(ch));
+            assert_eq!(world(&app), before, "{ch}");
+            assert!(app.status.is_none(), "{ch}");
+        }
+
+        // Enter opens the older post on its own card.
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            (app.post_sel, app.mode),
+            (1, Mode::PostDetail { comment: 0 })
+        );
+        assert_eq!(
+            app.selected_post().map(|p| p.body.as_str()),
+            Some("first post")
+        );
+
+        // Seed authors have one post each; invitations and suggestions none.
+        let app = App::new();
+        assert_eq!(app.activity("Felix Abernathy"), [6]);
+        assert!(app.activity("Noor Haddad").is_empty());
+        assert!(app.activity("Jordan Vale").is_empty());
+    }
+
+    #[test]
+    fn v_and_m_are_typed_in_every_text_box() {
+        // The composer.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "vm");
+        assert_eq!(app.draft, "vm");
+        assert_eq!(viewing(&app), None);
+
+        // The comment box.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "vm");
+        assert_eq!(app.comment_draft, "vm");
+        assert_eq!(viewing(&app), None);
+
+        // The reply box.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "vm");
+        assert_eq!(app.reply, "vm");
+        assert_eq!((viewing(&app), app.tab), (None, Tab::Messaging));
+
+        // Search, on every tab, over the post view and over a profile.
+        for keys in [
+            &[KeyCode::Char('1')][..],
+            &[KeyCode::Char('2')],
+            &[KeyCode::Char('3')],
+            &[KeyCode::Char('4')],
+            &[KeyCode::Char('5')],
+            &[KeyCode::Enter],
+            &[KeyCode::Char('v')],
+        ] {
+            let mut app = App::new();
+            for &k in keys {
+                press(&mut app, k);
+            }
+            let before = world(&app);
+            let open = viewing(&app);
+            press(&mut app, KeyCode::Char('/'));
+            type_str(&mut app, "vm");
+            assert_eq!(query(&app), Some("vm"), "{keys:?}");
+            assert_eq!(viewing(&app), open, "{keys:?}");
+            assert_eq!(world(&app), before, "{keys:?}");
+        }
+
+        // The Send picker, from the feed and the post view.
+        for mut app in [App::new(), maren_post_view()] {
+            press(&mut app, KeyCode::Char('s'));
+            let before = world(&app);
+            type_str(&mut app, "vm");
+            assert_eq!(filter(&app), Some("vm"));
+            assert_eq!(viewing(&app), None);
+            assert_eq!(world(&app), before);
+        }
+    }
+
+    /// Every name that appears with a headline, and where.
+    fn people_shown(app: &App) -> Vec<(&'static str, &'static str, &'static str)> {
+        let mut people = Vec::new();
+        for post in &app.posts {
+            people.push(("post", post.author, post.headline));
+            for c in &post.comments {
+                people.push(("comment", c.author, c.headline));
+            }
+        }
+        for p in &app.invitations {
+            people.push(("invitation", p.name, p.headline));
+        }
+        for s in &app.suggestions {
+            people.push(("suggestion", s.person.name, s.person.headline));
+        }
+        for c in &app.conversations {
+            people.push(("conversation", c.name, c.headline));
+        }
+        people
+    }
+
+    #[test]
+    fn everyone_has_one_profile_with_the_headline_shown_everywhere() {
+        let app = App::new();
+        let me = app.profile.name;
+        for (place, name, headline) in people_shown(&app) {
+            if name == me {
+                assert_eq!(headline, app.profile.headline, "{place}");
+                continue;
+            }
+            let profiles: Vec<&Member> = app.members.iter().filter(|m| m.name == name).collect();
+            assert_eq!(profiles.len(), 1, "{place} {name}: exactly one profile");
+            assert_eq!(profiles[0].headline, headline, "{place} {name}");
+        }
+        // Every profile is someone the app shows, and none is you.
+        let shown: Vec<&str> = people_shown(&app).iter().map(|p| p.1).collect();
+        for m in &app.members {
+            assert!(shown.contains(&m.name), "{}", m.name);
+            assert_ne!(m.name, me);
+        }
+        assert_eq!(app.members.len(), 16);
+
+        for m in &app.members {
+            // The current role is the headline, and there's an earlier one.
+            let current = &m.experience[0];
+            assert_eq!(
+                format!("{} at {}", current.title, current.company),
+                m.headline,
+                "{}",
+                m.name
+            );
+            assert!(current.years.ends_with("present"), "{}", m.name);
+            assert!(m.experience.len() >= 2, "{}", m.name);
+            assert!(m.location.contains(", "), "{}", m.name);
+            assert!(
+                m.about.split(". ").count() >= 2,
+                "{}: a few sentences",
+                m.name
+            );
+        }
+
+        // Invitations and suggestions agree on mutual counts and aren't
+        // connections yet. Everyone who posts or messages you is.
+        for p in app
+            .invitations
+            .iter()
+            .chain(app.suggestions.iter().map(|s| &s.person))
+        {
+            let m = app.member(p.name).expect("has a profile");
+            assert_eq!(m.mutual, p.mutual, "{}", p.name);
+            assert_eq!(app.degree(p.name), Some(Degree::Second), "{}", p.name);
+        }
+        for name in app
+            .posts
+            .iter()
+            .map(|p| p.author)
+            .chain(app.conversations.iter().map(|c| c.name))
+        {
+            assert_eq!(app.degree(name), Some(Degree::First), "{name}");
+        }
     }
 }
