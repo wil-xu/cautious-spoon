@@ -28,6 +28,7 @@ use crate::app::Search;
 use crate::app::SearchHit;
 use crate::app::SendPicker;
 use crate::app::Tab;
+use crate::app::TextField;
 use crate::app::first_line;
 use crate::app::search_needle;
 use crate::data::Job;
@@ -113,6 +114,41 @@ fn tail(text: &str, width: usize) -> &str {
         start = i;
     }
     &text[start..]
+}
+
+/// The part of a one-line box's text to show, as the text before the cursor
+/// and the text after it, in `width` columns (the cursor's own column is
+/// extra). Stateless: it depends only on the text, the cursor and the width.
+/// It is the end of the text (`tail`) while that shows at least a third of
+/// the width before the cursor, or all of the text. Otherwise the cursor sits
+/// a third of the way in (or nearer the left edge, close to the start of the
+/// text) and the text after it fills the rest. So with the cursor at the end
+/// the box shows exactly what `tail` shows, with it at the start it shows the
+/// start, and moving the cursor never jumps the text: going left from the
+/// end, the cursor walks to a third of the way in, then the text scrolls
+/// under it.
+fn around_cursor(text: &str, cursor: usize, width: usize) -> (&str, &str) {
+    let end = tail(text, width);
+    let start = text.len() - end.len();
+    let context = width / 3;
+    if cursor >= start && (start == 0 || width_of(&text[start..cursor]) >= context) {
+        return (&text[start..cursor], &text[cursor..]);
+    }
+    let before = tail(&text[..cursor], context);
+    let after = head(&text[cursor..], width.saturating_sub(width_of(before)));
+    (before, after)
+}
+
+/// A one-line box's text in `width` columns plus the cursor's: the part
+/// `around_cursor` picks, with the `▏` between the text before and after the
+/// cursor, all in `style` but the cursor.
+fn text_with_cursor(field: &TextField, width: usize, style: Style) -> Vec<Span<'static>> {
+    let (before, after) = around_cursor(field.text(), field.cursor(), width);
+    vec![
+        Span::styled(before.to_owned(), style),
+        Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
+        Span::styled(after.to_owned(), style),
+    ]
 }
 
 /// Splits typed text into rows of at most `width` columns, keeping every
@@ -426,14 +462,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
                 .areas(rest);
         let text = match &app.search {
             // Two columns of padding and the icon, then the cursor.
-            Some(s) => vec![
-                Span::styled(" ⌕ ", Style::new().fg(LIGHT_BLUE)),
-                Span::styled(
-                    tail(&s.query, usize_of(search.width).saturating_sub(4)).to_owned(),
+            Some(s) => [Span::styled(" ⌕ ", Style::new().fg(LIGHT_BLUE))]
+                .into_iter()
+                .chain(text_with_cursor(
+                    &s.query,
+                    usize_of(search.width).saturating_sub(4),
                     Style::new().fg(Color::White),
-                ),
-                Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
-            ],
+                ))
+                .collect(),
             None => vec![
                 Span::styled(" ⌕ ", Style::new().fg(DIM)),
                 Span::styled("Search", Style::new().fg(DIM)),
@@ -453,44 +489,59 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 /// columns. The post view's and a profile's name only the keys that do
 /// something in the current state.
 fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
-    if app.search.is_some() {
-        return vec![
-            ("type", "search"),
-            ("↑/↓", "move"),
-            ("enter", "open"),
-            ("esc", "close"),
-        ];
+    if let Some(search) = &app.search {
+        return text_box_hints(
+            &search.query,
+            [
+                ("type", "search"),
+                ("↑/↓", "move"),
+                ("enter", "open"),
+                ("esc", "close"),
+            ],
+        );
     }
-    if app.send.is_some() {
-        return vec![
-            ("type", "filter"),
-            ("↑/↓", "move"),
-            ("enter", "send"),
-            ("esc", "cancel"),
-        ];
+    if let Some(picker) = &app.send {
+        return text_box_hints(
+            &picker.query,
+            [
+                ("type", "filter"),
+                ("↑/↓", "move"),
+                ("enter", "send"),
+                ("esc", "cancel"),
+            ],
+        );
     }
     if let Some(page) = &app.profile_page {
         return profile_hints(app, page);
     }
     match (app.tab, app.mode) {
-        (_, Mode::Composer) => vec![
-            ("type", "write"),
-            ("backspace", "delete"),
-            ("enter", "publish"),
-            ("esc", "discard"),
-        ],
-        (_, Mode::Reply) => vec![
-            ("type", "write"),
-            ("backspace", "delete"),
-            ("enter", "send"),
-            ("esc", "back to list"),
-        ],
-        (_, Mode::CommentBox { .. }) => vec![
-            ("type", "write"),
-            ("backspace", "delete"),
-            ("enter", "post"),
-            ("esc", "cancel"),
-        ],
+        (_, Mode::Composer) => text_box_hints(
+            &app.draft,
+            [
+                ("type", "write"),
+                ("backspace", "delete"),
+                ("enter", "publish"),
+                ("esc", "discard"),
+            ],
+        ),
+        (_, Mode::Reply) => text_box_hints(
+            &app.reply,
+            [
+                ("type", "write"),
+                ("backspace", "delete"),
+                ("enter", "send"),
+                ("esc", "back to list"),
+            ],
+        ),
+        (_, Mode::CommentBox { .. }) => text_box_hints(
+            &app.comment_draft,
+            [
+                ("type", "write"),
+                ("backspace", "delete"),
+                ("enter", "post"),
+                ("esc", "cancel"),
+            ],
+        ),
         (_, Mode::PostDetail { comment }) => post_view_hints(app, comment),
         // `1-5 tabs` made room for `v profile`, as `tab next` did for
         // `r repost`. Both keys still work.
@@ -540,6 +591,22 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("q", "quit"),
         ],
     }
+}
+
+/// A text box's hints: `base`, then `←/→ cursor` once the box holds text,
+/// since in an empty box the arrows have nowhere to go. It says `cursor`, not
+/// `move`, because search and the Send picker already use `↑/↓ move` for the
+/// results. It goes last, so a footer too narrow for it reads as it did
+/// before the cursor could move.
+fn text_box_hints(
+    field: &TextField,
+    base: [(&'static str, &'static str); 4],
+) -> Vec<(&'static str, &'static str)> {
+    let mut hints = base.to_vec();
+    if !field.is_empty() {
+        hints.push(("←/→", "cursor"));
+    }
+    hints
 }
 
 /// The post view's hints. `j/k comments` only when there are comments to
@@ -939,10 +1006,13 @@ fn render_comment_box(frame: &mut Frame, app: &App, area: Rect) {
             cursor,
         ]),
         (true, false) => {
-            // Show the end of a long comment, where the cursor is. One column
-            // goes to the cursor.
-            let shown = tail(&app.comment_draft, box_width.saturating_sub(1)).to_owned();
-            Line::from(vec![Span::raw(shown), cursor])
+            // Keep the cursor in view (`around_cursor`). One column goes to
+            // the cursor.
+            Line::from(text_with_cursor(
+                &app.comment_draft,
+                box_width.saturating_sub(1),
+                Style::new(),
+            ))
         }
     };
     frame.render_widget(Paragraph::new(line).block(block), area);
@@ -982,6 +1052,24 @@ fn composer_area(body: Rect) -> Rect {
     centered(body, body.width.saturating_sub(4).min(64), 12)
 }
 
+/// The composer's draft with the `▏` inserted at the cursor, split into rows
+/// by `hard_wrap`, and the index of the row holding the cursor.
+fn wrap_with_cursor(draft: &TextField, width: usize) -> (Vec<String>, usize) {
+    let (before, after) = draft.text().split_at(draft.cursor());
+    let rows = hard_wrap(&format!("{before}▏{after}"), width);
+    // The rows are consecutive slices of the text, so the cursor's row is
+    // the one whose bytes cover byte `before.len()`, where the `▏` starts.
+    let mut end = 0;
+    let row = rows
+        .iter()
+        .position(|row| {
+            end += row.len();
+            end > before.len()
+        })
+        .unwrap_or(rows.len() - 1);
+    (rows, row)
+}
+
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let popup = composer_area(area);
     clear_overlay(frame, popup);
@@ -997,6 +1085,9 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::raw(""),
     ];
+    // The first draft row, with the cursor, always shows: in a box too short
+    // for all three, the blank line goes first, then the name.
+    lines.truncate(usize_of(inner.height).saturating_sub(1));
     let cursor = Span::styled("▏", Style::new().fg(LIGHT_BLUE));
     if app.draft.is_empty() {
         lines.push(Line::from(vec![
@@ -1004,10 +1095,11 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("What do you want to talk about?", Style::new().fg(DIM)),
         ]));
     } else {
-        // Keep the end of a long draft, where the cursor is, in view.
         let rows = usize_of(inner.height).saturating_sub(lines.len()).max(1);
-        let text = hard_wrap(&format!("{}▏", app.draft), width);
-        let skip = text.len().saturating_sub(rows);
+        let (text, row) = wrap_with_cursor(&app.draft, width);
+        // The last rows that still hold the cursor's: the end of the draft
+        // while the cursor is in it, otherwise the cursor's row at the top.
+        let skip = text.len().saturating_sub(rows).min(row);
         lines.extend(text.into_iter().skip(skip).map(Line::raw));
     }
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1017,6 +1109,13 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 
 const SEARCH_PROMPT: &str = "Type to search people, jobs, posts, comments and messages";
 const NO_RESULTS: &str = "No results";
+
+/// An overlay's input row and the rows under it. The input row is split off
+/// first, so with room for only one row it is the input row that shows,
+/// with the cursor in it.
+fn input_first(inner: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner)
+}
 
 /// Where the search overlay goes over the body.
 fn search_area(body: Rect) -> Rect {
@@ -1186,23 +1285,22 @@ fn body_line(body: &str, needle: &str, style: Style, width: usize) -> Vec<Span<'
 /// before the result count shows.
 const QUERY_MIN_WIDTH: usize = 10;
 
-/// The search box's first row: `⌕ `, the end of the query and the cursor,
-/// then `N results` on the right. The count goes first when the row is too
-/// narrow, so the end of the query, which was just typed, stays in view.
-fn search_input(query: &str, results: usize, width: usize) -> Line<'static> {
+/// The search box's first row: `⌕ `, the query around the cursor
+/// (`around_cursor`), then `N results` on the right. The count goes first when
+/// the row is too narrow, so the query, and the cursor in it, stay in view.
+fn search_input(query: &TextField, results: usize, width: usize) -> Line<'static> {
+    // The icon gives way before the cursor does, in a row under 3 columns.
+    let icon = head("⌕ ", width.saturating_sub(1));
     // The icon and the cursor.
-    let fixed = 3;
-    let keep = width_of(query).min(QUERY_MIN_WIDTH);
+    let fixed = width_of(icon) + 1;
+    let keep = width_of(query.text()).min(QUERY_MIN_WIDTH);
     let label = Some(results)
         .filter(|&n| n > 0)
         .map(|n| count(u32::try_from(n).unwrap_or(u32::MAX), "result"))
         .filter(|label| fixed + keep + 2 + width_of(label) <= width);
     let room = width.saturating_sub(fixed + label.as_deref().map_or(0, |l| width_of(l) + 2));
-    let left = vec![
-        Span::styled("⌕ ", Style::new().fg(LIGHT_BLUE)),
-        Span::styled(tail(query, room).to_owned(), Style::new().fg(Color::White)),
-        Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
-    ];
+    let mut left = vec![Span::styled(icon, Style::new().fg(LIGHT_BLUE))];
+    left.extend(text_with_cursor(query, room, Style::new().fg(Color::White)));
     match label {
         Some(label) => spread(left, vec![Span::styled(label, Style::new().fg(DIM))], width),
         None => Line::from(left),
@@ -1353,15 +1451,11 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search, body: Rect) {
     let inner = block.inner(popup);
     let width = usize_of(inner.width);
     frame.render_widget(block, popup);
-    let [input, rule, results] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
+    let [input, rest] = input_first(inner);
+    let [rule, results] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(rest);
 
-    let needle = search_needle(&search.query);
-    let hits = app.search_hits(&search.query);
+    let needle = search_needle(search.query.text());
+    let hits = app.search_hits(search.query.text());
     frame.render_widget(search_input(&search.query, hits.len(), width), input);
     frame.render_widget(
         Line::styled("─".repeat(width), Style::new().fg(BORDER)),
@@ -1409,24 +1503,30 @@ fn render_search(frame: &mut Frame, app: &App, search: &Search, body: Rect) {
 const SEND_PLACEHOLDER: &str = "Type a name";
 const NO_MATCHES: &str = "No matches";
 
-/// The Send picker's first row: `To `, the end of the filter and the cursor,
-/// or a dim placeholder and the cursor when the filter is empty.
-fn send_input(filter: &str, width: usize) -> Line<'static> {
-    // `To ` and the cursor.
-    let room = width.saturating_sub(4);
-    let text = if filter.is_empty() {
-        Span::styled(
-            head(SEND_PLACEHOLDER, room).to_owned(),
-            Style::new().fg(DIM),
-        )
+/// The Send picker's first row: `To ` and the filter around the cursor
+/// (`around_cursor`), or a dim placeholder and the cursor when the filter is
+/// empty.
+fn send_input(filter: &TextField, width: usize) -> Line<'static> {
+    // `To ` gives way before the cursor does, in a row under 4 columns.
+    let label = head("To ", width.saturating_sub(1));
+    let room = width.saturating_sub(width_of(label) + 1);
+    let mut spans = vec![Span::styled(label, Style::new().fg(LIGHT_BLUE))];
+    if filter.is_empty() {
+        spans.extend([
+            Span::styled(
+                head(SEND_PLACEHOLDER, room).to_owned(),
+                Style::new().fg(DIM),
+            ),
+            Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
+        ]);
     } else {
-        Span::styled(tail(filter, room).to_owned(), Style::new().fg(Color::White))
-    };
-    Line::from(vec![
-        Span::styled("To ", Style::new().fg(LIGHT_BLUE)),
-        text,
-        Span::styled("▏", Style::new().fg(LIGHT_BLUE)),
-    ])
+        spans.extend(text_with_cursor(
+            filter,
+            room,
+            Style::new().fg(Color::White),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// The Send picker, sized and placed like the search overlay: the filter, the
@@ -1438,13 +1538,13 @@ fn render_send(frame: &mut Frame, app: &App, picker: &SendPicker, body: Rect) {
     let inner = block.inner(popup);
     let width = usize_of(inner.width);
     frame.render_widget(block, popup);
-    let [input, post_row, rule, list] = Layout::vertical([
-        Constraint::Length(1),
+    let [input, rest] = input_first(inner);
+    let [post_row, rule, list] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
     ])
-    .areas(inner);
+    .areas(rest);
 
     frame.render_widget(send_input(&picker.query, width), input);
     if let Some(post) = app.selected_post() {
@@ -1465,7 +1565,7 @@ fn render_send(frame: &mut Frame, app: &App, picker: &SendPicker, body: Rect) {
         rule,
     );
 
-    let recipients = app.send_recipients(&picker.query);
+    let recipients = app.send_recipients(picker.query.text());
     if recipients.is_empty() {
         frame.render_widget(
             Line::styled(truncate(NO_MATCHES, width), Style::new().fg(DIM)),
@@ -1476,7 +1576,7 @@ fn render_send(frame: &mut Frame, app: &App, picker: &SendPicker, body: Rect) {
     // One column goes to the selection bar. As in search, only the first
     // match in each name is bold, so bold always means "match".
     let width = width.saturating_sub(1);
-    let needle = search_needle(&picker.query);
+    let needle = search_needle(picker.query.text());
     let items = recipients
         .iter()
         .map(|&i| {
@@ -1952,12 +2052,32 @@ fn render_jobs(frame: &mut Frame, app: &App, area: Rect) {
 
 // ----------------------------------------------------------- Messaging
 
-fn render_messaging(frame: &mut Frame, app: &App, area: Rect) {
-    let [list_area, thread_area] = Layout::horizontal([
+/// Messaging's conversation list and thread, side by side.
+fn messaging_areas(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([
         Constraint::Length(MESSAGING_LIST_WIDTH.min(area.width / 2)),
         Constraint::Min(0),
     ])
-    .areas(area);
+    .areas(area)
+}
+
+/// An open thread's inside, top to bottom: the name and headline, a rule,
+/// the messages and the 3-row reply box. The reply box is split off first,
+/// so on a short thread it stays whole, with room for the cursor, and the
+/// rows above give way.
+fn thread_areas(inner: Rect) -> [Rect; 4] {
+    let [rest, reply] = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(inner);
+    let [head, rule, messages] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(rest);
+    [head, rule, messages, reply]
+}
+
+fn render_messaging(frame: &mut Frame, app: &App, area: Rect) {
+    let [list_area, thread_area] = messaging_areas(area);
 
     let block = card(" Messaging ", app.mode == Mode::Browse);
     let inner = block.inner(list_area);
@@ -2028,13 +2148,7 @@ fn render_messaging(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(thread_area);
     frame.render_widget(block, thread_area);
     let width = usize_of(inner.width);
-    let [head, rule, messages, reply] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(3),
-    ])
-    .areas(inner);
+    let [head, rule, messages, reply] = thread_areas(inner);
 
     frame.render_widget(
         Paragraph::new(vec![
@@ -2080,10 +2194,13 @@ fn render_messaging(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("Write a message…", Style::new().fg(DIM)),
         ]),
         (true, false) => {
-            // Show the end of a long reply, where the cursor is. One column
-            // goes to the cursor.
-            let shown = tail(&app.reply, box_width.saturating_sub(1)).to_owned();
-            Line::from(vec![Span::raw(shown), cursor])
+            // Keep the cursor in view (`around_cursor`). One column goes to
+            // the cursor.
+            Line::from(text_with_cursor(
+                &app.reply,
+                box_width.saturating_sub(1),
+                Style::new(),
+            ))
         }
     };
     frame.render_widget(Paragraph::new(line).block(block), reply);
@@ -2237,6 +2354,7 @@ mod tests {
                 "reply",
                 at(&[KeyCode::Char('4'), KeyCode::Enter], "a reply in progress"),
             ),
+            ("reply empty", at(&[KeyCode::Char('4'), KeyCode::Enter], "")),
             ("notifications", at(&[KeyCode::Char('5')], "")),
             ("search", at(&[KeyCode::Char('/')], "bright")),
             ("search empty", at(&[KeyCode::Char('/')], "")),
@@ -3520,7 +3638,7 @@ mod tests {
                 seen.push(set);
             }
         }
-        assert_eq!(seen.len(), 19, "every hint set was checked");
+        assert_eq!(seen.len(), 24, "every hint set was checked");
     }
 
     fn header_row(app: &App, width: u16, height: u16) -> String {
@@ -4369,7 +4487,7 @@ mod tests {
     #[test]
     fn the_count_goes_before_the_end_of_the_query() {
         let text = |query: &str, n: usize, width: usize| -> String {
-            search_input(query, n, width)
+            search_input(&TextField::from(query), n, width)
                 .spans
                 .iter()
                 .map(|s| s.content.as_ref())
@@ -5983,6 +6101,456 @@ mod tests {
                 );
                 assert!(!acts(make.as_ref(), code), "{name}: {ch:?} does something");
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- Cursor
+
+    #[test]
+    fn around_cursor_shows_the_end_the_start_or_the_cursor_a_third_in() {
+        // With the cursor at the end it is exactly `tail`, and at the start
+        // the start, at every width.
+        for text in ["hello world", WIDE, "ab日", "日本語"] {
+            for width in 0..=width_of(text) + 2 {
+                assert_eq!(
+                    around_cursor(text, text.len(), width),
+                    (tail(text, width), ""),
+                    "{text:?} at {width}"
+                );
+                assert_eq!(
+                    around_cursor(text, 0, width),
+                    ("", head(text, width)),
+                    "{text:?} at {width}"
+                );
+            }
+        }
+        // A text that fits shows whole, wherever the cursor is.
+        assert_eq!(around_cursor("abc", 1, 10), ("a", "bc"));
+        // The end, while it keeps a third of the width before the cursor.
+        assert_eq!(around_cursor("abcdefghij", 8, 6), ("efgh", "ij"));
+        assert_eq!(around_cursor("abcdefghij", 6, 6), ("ef", "ghij"));
+        // Otherwise the cursor sits a third of the way in.
+        assert_eq!(around_cursor("abcdefghij", 5, 6), ("de", "fghi"));
+        assert_eq!(around_cursor("abcdefghij", 3, 6), ("bc", "defg"));
+        assert_eq!(around_cursor("abcdefghij", 1, 6), ("a", "bcdef"));
+        // A double-width character is never split.
+        assert_eq!(around_cursor("日本語", 3, 3), ("", "本"));
+        assert_eq!(around_cursor("日本語x", 3, 6), ("日", "本語"));
+        // A context of one column can't hold `本`, so none shows.
+        assert_eq!(around_cursor("日本語x", 6, 4), ("", "語x"));
+
+        // Everywhere: the two parts meet at the cursor and fit the width,
+        // and moving the cursor never moves the window the other way.
+        for text in ["hello world, and more", WIDE, "a日b本c語d"] {
+            let stops: Vec<usize> = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain([text.len()])
+                .collect();
+            for width in 0..=30 {
+                let mut last_start = 0;
+                for &cursor in &stops {
+                    let (before, after) = around_cursor(text, cursor, width);
+                    assert!(
+                        text[..cursor].ends_with(before),
+                        "{text:?} {cursor} {width}"
+                    );
+                    assert!(
+                        text[cursor..].starts_with(after),
+                        "{text:?} {cursor} {width}"
+                    );
+                    assert!(width_of(before) + width_of(after) <= width);
+                    let start = cursor - before.len();
+                    assert!(
+                        start >= last_start,
+                        "{text:?} {cursor} {width}: jumped back"
+                    );
+                    last_start = start;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_with_cursor_finds_the_cursors_row() {
+        let at = |text: &str, cursor: usize, width: usize| {
+            let mut field = TextField::from(text);
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char('p'));
+            type_str(&mut app, text);
+            press(&mut app, KeyCode::Home);
+            for _ in 0..text[..cursor].chars().count() {
+                press(&mut app, KeyCode::Right);
+            }
+            field.clone_from(&app.draft);
+            wrap_with_cursor(&field, width)
+        };
+        let rows = |r: &[&str]| r.iter().map(|&r| r.to_owned()).collect::<Vec<_>>();
+        assert_eq!(at("abcdef", 0, 3), (rows(&["▏ab", "cde", "f"]), 0));
+        assert_eq!(at("abcdef", 3, 3), (rows(&["abc", "▏de", "f"]), 1));
+        assert_eq!(at("abcdef", 6, 3), (rows(&["abc", "def", "▏"]), 2));
+        assert_eq!(at("a日本", 1, 3), (rows(&["a▏", "日", "本"]), 0));
+        assert_eq!(at("a日本", 4, 3), (rows(&["a日", "▏本"]), 1));
+    }
+
+    const COMPOSER: &[KeyCode] = &[KeyCode::Char('p')];
+    const COMMENT: &[KeyCode] = &[KeyCode::Enter, KeyCode::Char('c')];
+    const REPLY: &[KeyCode] = &[KeyCode::Char('4'), KeyCode::Enter];
+    const SEARCH: &[KeyCode] = &[KeyCode::Char('/')];
+    const SEND: &[KeyCode] = &[KeyCode::Char('s')];
+
+    /// A box opened on the seed with `open`, `text` typed, then `keys`.
+    fn in_box(open: &[KeyCode], text: &str, keys: &[KeyCode]) -> App {
+        let mut app = App::new();
+        for &code in open {
+            press(&mut app, code);
+        }
+        type_str(&mut app, text);
+        for &code in keys {
+            press(&mut app, code);
+        }
+        app
+    }
+
+    /// Where a box is on a `width`×`height` screen, if it shows.
+    type BoxArea = fn(u16, u16) -> Option<Rect>;
+
+    /// Where the reply box is on a `width`×`height` screen, with a thread open.
+    fn reply_box(width: u16, height: u16) -> Option<Rect> {
+        let body = screen_areas(Rect::new(0, 0, width, height))[1];
+        let [_, thread] = messaging_areas(body);
+        let [.., reply] = thread_areas(card(" Thread ", false).inner(thread));
+        Some(reply)
+    }
+
+    fn composer_box(width: u16, height: u16) -> Option<Rect> {
+        Some(composer_popup(width, height))
+    }
+
+    fn search_box(width: u16, height: u16) -> Option<Rect> {
+        Some(search_popup(width, height))
+    }
+
+    /// The text rows inside `area`'s border, from `first` rows below the
+    /// top border, trimmed.
+    fn rows_in(buf: &Buffer, area: Rect, first: u16) -> Vec<String> {
+        (area.top() + first..area.bottom().saturating_sub(1))
+            .map(|y| {
+                text_between(buf, y, area.left() + 1, area.right() - 1)
+                    .trim()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The first text row of a box: the draft's first row in the composer
+    /// (below the name and a blank line), the only row elsewhere.
+    fn box_row(app: &App, area: Rect, width: u16, height: u16) -> String {
+        let first = if app.mode == Mode::Composer { 3 } else { 1 };
+        rows_in(&buffer(app, width, height), area, first).swap_remove(0)
+    }
+
+    #[test]
+    fn the_cursor_shows_in_the_middle_of_every_box() {
+        let middle = [KeyCode::Left; 4];
+        let (w, h) = (120, 30);
+        let row = |open, area: BoxArea| {
+            let app = in_box(open, "Nice one", &middle);
+            box_row(&app, area(w, h).expect("the box shows"), w, h)
+        };
+        assert_eq!(row(COMMENT, comment_box), "Nice▏ one");
+        assert_eq!(row(REPLY, reply_box), "Nice▏ one");
+        assert_eq!(row(COMPOSER, composer_box), "Nice▏ one");
+        assert_eq!(row(SEND, search_box), "To Nice▏ one");
+        let search = row(SEARCH, search_box);
+        assert!(search.starts_with("⌕ Nice▏ one"), "{search:?}");
+        // The top bar's search box too.
+        let app = in_box(SEARCH, "Nice one", &middle);
+        let header = header_row(&app, w, h);
+        assert!(header.contains("⌕ Nice▏ one "), "{header:?}");
+        // The cursor goes between characters: none is drawn over.
+        let app = in_box(COMMENT, "Nice one", &middle);
+        let area = comment_box(w, h).expect("the box shows");
+        let buf = buffer(&app, w, h);
+        let x = area.left() + 2;
+        let cells: String = (x..x + 9).map(|x| buf[(x, area.y + 1)].symbol()).collect();
+        assert_eq!(cells, "Nice▏ one");
+        assert_eq!(buf[(x + 4, area.y + 1)].fg, LIGHT_BLUE);
+        assert_eq!(buf[(x + 5, area.y + 1)].fg, buf[(x, area.y + 1)].fg);
+    }
+
+    #[test]
+    fn a_long_text_shows_its_start_with_the_cursor_there_and_its_end_as_before() {
+        let long = format!("Start {}", WIDE.repeat(4));
+        let boxes: [(&str, &[KeyCode], BoxArea, &str); 5] = [
+            ("comment box", COMMENT, comment_box, ""),
+            ("reply box", REPLY, reply_box, ""),
+            ("composer", COMPOSER, composer_box, ""),
+            ("search", SEARCH, search_box, "⌕ "),
+            ("send picker", SEND, search_box, "To "),
+        ];
+        for (name, open, area, label) in boxes {
+            let typed = in_box(open, &long, &[]);
+            let start = in_box(open, &long, &[KeyCode::Home]);
+            let back = in_box(open, &long, &[KeyCode::Home, KeyCode::End]);
+            for (w, h) in [(120, 30), (80, 24), (60, 20)] {
+                let area = area(w, h).expect("the box shows");
+                // The start, the cursor before it, as much as fits.
+                let row = box_row(&start, area, w, h);
+                let shown = row
+                    .strip_prefix(label)
+                    .and_then(|r| r.strip_prefix('▏'))
+                    .unwrap_or_else(|| panic!("{name} at {w}x{h}: {row:?}"));
+                assert!(shown.starts_with("Start a日"), "{name} at {w}x{h}: {row:?}");
+                assert!(
+                    long.starts_with(shown.split("  ").next().unwrap_or(shown)),
+                    "{name} at {w}x{h}: {row:?}"
+                );
+                // At the end, exactly what it showed before the cursor moved.
+                assert_eq!(
+                    screen(&back, w, h),
+                    screen(&typed, w, h),
+                    "{name} at {w}x{h}"
+                );
+                if open != COMPOSER {
+                    let row = box_row(&typed, area, w, h);
+                    assert!(row.contains('▏'), "{name} at {w}x{h}: {row:?}");
+                    let end = row.split('▏').next().unwrap_or("");
+                    let end = end.strip_prefix(label).unwrap_or(end);
+                    assert!(long.ends_with(end), "{name} at {w}x{h}: {row:?}");
+                }
+            }
+            // The top bar shows the start too.
+            if open == SEARCH {
+                let header = header_row(&start, 120, 30);
+                assert!(header.contains("⌕ ▏Start a日"), "{header:?}");
+                assert_eq!(header_row(&back, 120, 30), header_row(&typed, 120, 30));
+            }
+        }
+    }
+
+    #[test]
+    fn a_composer_draft_taller_than_the_box_shows_the_cursors_row() {
+        let draft = format!("First row {}", "and then some more words ".repeat(30));
+        let (w, h) = (120, 30);
+        let popup = composer_popup(w, h);
+        let inner = card(" Create a post ", true).inner(popup);
+        let shown = |app: &App| rows_in(&buffer(app, w, h), popup, 3);
+        let room = shown(&in_box(COMPOSER, "", &[])).len();
+        let wrapped = |cursor: usize| {
+            let (before, after) = draft.split_at(cursor);
+            hard_wrap(&format!("{before}▏{after}"), usize_of(inner.width))
+        };
+        assert!(wrapped(0).len() > room + 4, "the draft must not fit");
+
+        // The cursor on the first row: the first rows show.
+        let start = in_box(COMPOSER, &draft, &[KeyCode::Home]);
+        let rows = shown(&start);
+        assert!(rows[0].starts_with("▏First row"), "{rows:#?}");
+        let expected: Vec<String> = wrapped(0)
+            .iter()
+            .take(room)
+            .map(|r| r.trim().to_owned())
+            .collect();
+        assert_eq!(rows, expected);
+
+        // On a middle row, that row shows, at the top.
+        let mut middle = in_box(COMPOSER, &draft, &[KeyCode::Home]);
+        for _ in 0..200 {
+            press(&mut middle, KeyCode::Right);
+        }
+        let rows = shown(&middle);
+        let all = wrapped(200);
+        let row = all
+            .iter()
+            .position(|r| r.contains('▏'))
+            .expect("the cursor");
+        assert!(row > 0 && row + room < all.len(), "a middle row: {row}");
+        assert!(rows[0].contains('▏'), "{rows:#?}");
+        assert_eq!(rows[0], all[row].trim());
+
+        // At the end, as before the cursor could move: the last rows.
+        let typed = in_box(COMPOSER, &draft, &[]);
+        let back = in_box(COMPOSER, &draft, &[KeyCode::Home, KeyCode::End]);
+        assert_eq!(screen(&back, w, h), screen(&typed, w, h));
+        let rows = shown(&typed);
+        assert!(rows.last().is_some_and(|r| r.ends_with('▏')), "{rows:#?}");
+    }
+
+    #[test]
+    fn every_box_keeps_its_cursor_inside_its_border_at_every_size() {
+        let long = "日本語 text".repeat(375);
+        let right_1500: Vec<KeyCode> = [KeyCode::Home]
+            .into_iter()
+            .chain([KeyCode::Right; 1500])
+            .collect();
+        let positions: [(&str, &str, &[KeyCode]); 6] = [
+            ("empty", "", &[]),
+            ("start", &long, &[KeyCode::Home]),
+            ("middle", &long, &right_1500),
+            ("end", &long, &[]),
+            ("after a wide char", &long, &[KeyCode::Home, KeyCode::Right]),
+            ("before a wide char", &long, &[KeyCode::Left; 8]),
+        ];
+        let boxes: [(&str, &[KeyCode], BoxArea); 5] = [
+            ("composer", COMPOSER, composer_box),
+            ("comment box", COMMENT, comment_box),
+            ("reply box", REPLY, reply_box),
+            ("search", SEARCH, search_box),
+            ("send picker", SEND, search_box),
+        ];
+        let states: Vec<(String, App, BoxArea)> = boxes
+            .iter()
+            .flat_map(|&(name, open, area)| {
+                positions.iter().map(move |&(at, text, keys)| {
+                    let app = in_box(open, text, keys);
+                    (format!("{name}, {at}"), app, area)
+                })
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            for (name, app, area) in &states {
+                scope.spawn(move || {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            let what = format!("{name} at {width}x{height}");
+                            let buf = terminal.backend().buffer();
+                            // The top bar's search box, whenever it shows.
+                            let header = screen_areas(Rect::new(0, 0, width, height))[0];
+                            if app.search.is_some()
+                                && header.height >= 3
+                                && header_fit(app, width.saturating_sub(2)).0
+                            {
+                                let row = text_between(buf, 1, 0, width);
+                                assert_eq!(row.matches('▏').count(), 1, "{what}: {row:?}");
+                            }
+                            let Some(area) = area(width, height) else {
+                                continue;
+                            };
+                            if area.width < 2 || area.height < 2 {
+                                continue;
+                            }
+                            assert_bordered(buf, area, &what);
+                            // Wherever the box has room inside its border
+                            // and padding, the cursor is there, once.
+                            let inside = card("", true).inner(area);
+                            if inside.width >= 1 && inside.height >= 1 {
+                                let rows = rows_in(buf, area, 1).concat();
+                                let cursors = rows.matches('▏').count();
+                                assert_eq!(cursors, 1, "{what}: {rows:?}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn short_boxes_keep_their_input_row() {
+        // The reply box is whole whenever the thread has 3 rows, and is
+        // what's left below that; the rows above give way first.
+        for height in 0..=40 {
+            let inner = Rect::new(0, 0, 20, height);
+            let [head, rule, messages, reply] = thread_areas(inner);
+            assert_eq!(reply.height, height.min(3), "{height}");
+            assert_eq!(reply.bottom(), inner.bottom(), "{height}");
+            let above = head.height + rule.height + messages.height;
+            assert_eq!(above, height - reply.height, "{height}");
+        }
+        // The overlays give a lone row to the input row.
+        assert_eq!(input_first(Rect::new(0, 0, 9, 1))[0].height, 1);
+        // On a 9-row screen the Send picker's inside is one row: the filter,
+        // not the post line. Search there shows its query and cursor too. At
+        // 12x9 that row is 4 columns: `To ` and the cursor.
+        assert_eq!(
+            box_row(&in_box(SEND, "fe", &[]), search_popup(12, 9), 12, 9),
+            "To ▏"
+        );
+        let (w, h) = (30, 9);
+        let area = search_popup(w, h);
+        assert_eq!(card("", true).inner(area).height, 1);
+        let send = in_box(SEND, "fe", &[KeyCode::Left]);
+        assert_eq!(box_row(&send, area, w, h), "To f▏e");
+        let search = in_box(SEARCH, "ty", &[KeyCode::Left]);
+        let row = box_row(&search, area, w, h);
+        assert!(row.starts_with("⌕ t▏y"), "{row:?}");
+        // In a row too narrow for the label, the label gives way, not the
+        // cursor.
+        let row = |line: Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let typo = TextField::from("typo");
+        assert_eq!(row(search_input(&typo, 0, 2)), "⌕▏");
+        assert_eq!(row(search_input(&typo, 0, 1)), "▏");
+        assert_eq!(row(send_input(&typo, 3)), "To▏");
+        assert_eq!(row(send_input(&TextField::default(), 1)), "▏");
+        // The composer drops its blank line, then its name, before the
+        // draft's row. Its inside is 6 rows shorter than the screen.
+        let composer = in_box(COMPOSER, "draft", &[]);
+        let shown = |h: u16| -> Vec<String> {
+            rows_in(&buffer(&composer, 40, h), composer_popup(40, h), 1)
+                .into_iter()
+                .map(|r| r.split(" ·").next().unwrap_or("").to_owned())
+                .collect()
+        };
+        assert_eq!(shown(9), ["Jordan Vale", "", "draft▏"]);
+        assert_eq!(shown(8), ["Jordan Vale", "draft▏"]);
+        assert_eq!(shown(7), ["draft▏"]);
+    }
+
+    #[test]
+    fn text_box_footers_name_the_cursor_keys_once_there_is_text() {
+        let footer = |app: &App| {
+            screen(app, 80, 24)
+                .lines()
+                .last()
+                .expect("screen has rows")
+                .trim()
+                .to_owned()
+        };
+        for (open, empty) in [
+            (
+                COMPOSER,
+                "type write  backspace delete  enter publish  esc discard",
+            ),
+            (
+                COMMENT,
+                "type write  backspace delete  enter post  esc cancel",
+            ),
+            (
+                REPLY,
+                "type write  backspace delete  enter send  esc back to list",
+            ),
+            (SEARCH, "type search  ↑/↓ move  enter open  esc close"),
+            (SEND, "type filter  ↑/↓ move  enter send  esc cancel"),
+        ] {
+            let app = in_box(open, "", &[]);
+            assert_eq!(footer(&app), empty, "nothing for the arrows to move over");
+            let mut app = in_box(open, "Nice one", &[]);
+            assert_eq!(footer(&app), format!("{empty}  ←/→ cursor"));
+            assert!(hints_line(&hints(&app)).width() <= 80);
+            for (key, what) in hints(&app) {
+                assert_single_width("text box hints", key);
+                assert_single_width("text box hints", what);
+            }
+            // Both keys do something there.
+            let before = screen(&app, 120, 30);
+            press(&mut app, KeyCode::Left);
+            let moved = screen(&app, 120, 30);
+            assert_ne!(moved, before, "← moves the cursor");
+            press(&mut app, KeyCode::Right);
+            assert_ne!(screen(&app, 120, 30), moved, "→ moves it back");
+            assert_eq!(screen(&app, 120, 30), before);
         }
     }
 }

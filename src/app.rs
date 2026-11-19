@@ -79,10 +79,124 @@ pub(crate) enum Mode {
     Reply,
 }
 
+/// Editable text with a cursor: what all five text boxes (the composer, the
+/// comment box, the reply box, search and the Send picker) edit. `cursor` is
+/// a byte index into `text`, always on a `char` boundary, so slicing at it
+/// never panics. A step is one `char`, so a double-width character such as
+/// `日` is one step and never split.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TextField {
+    text: String,
+    cursor: usize,
+}
+
+/// What a key did to a `TextField`, or the key it leaves to the box's owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    /// The text changed.
+    Changed,
+    /// The text didn't change. The cursor may have moved.
+    Unchanged,
+    Enter,
+    Esc,
+    Up,
+    Down,
+}
+
+impl TextField {
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The cursor, as a byte index into `text()` on a `char` boundary.
+    pub(crate) fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Empty text, cursor at 0: how every box opens.
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+
+    /// The boundary one `char` before the cursor, or 0.
+    fn before(&self) -> usize {
+        self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i)
+    }
+
+    /// The boundary one `char` after the cursor, or the end.
+    fn after(&self) -> usize {
+        self.text[self.cursor..]
+            .chars()
+            .next()
+            .map_or(self.cursor, |ch| self.cursor + ch.len_utf8())
+    }
+
+    /// Edits the text for one key. A typed key (`KeyCode::Char`, Shift
+    /// allowed) goes in at the cursor, which moves past it. `←`/`→` move one
+    /// `char` and `Home`/`End` jump to either end. `Backspace` deletes the
+    /// `char` before the cursor and `Delete` the one under it, each doing
+    /// nothing at its end of the text. Ctrl- and Alt-modified keys, `Tab`,
+    /// `BackTab` and every other key do nothing. `Enter`, `Esc`, `↑` and `↓`
+    /// are returned for the owner.
+    fn on_key(&mut self, key: KeyEvent) -> Edit {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return Edit::Unchanged;
+        }
+        match key.code {
+            KeyCode::Enter => return Edit::Enter,
+            KeyCode::Esc => return Edit::Esc,
+            KeyCode::Up => return Edit::Up,
+            KeyCode::Down => return Edit::Down,
+            KeyCode::Left => self.cursor = self.before(),
+            KeyCode::Right => self.cursor = self.after(),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.text.len(),
+            KeyCode::Backspace if self.cursor > 0 => {
+                let start = self.before();
+                self.text.replace_range(start..self.cursor, "");
+                self.cursor = start;
+                return Edit::Changed;
+            }
+            KeyCode::Delete if self.cursor < self.text.len() => {
+                self.text.replace_range(self.cursor..self.after(), "");
+                return Edit::Changed;
+            }
+            KeyCode::Char(ch) => {
+                self.text.insert(self.cursor, ch);
+                self.cursor += ch.len_utf8();
+                return Edit::Changed;
+            }
+            _ => {}
+        }
+        Edit::Unchanged
+    }
+}
+
+/// The text, with the cursor at its end.
+impl From<&str> for TextField {
+    fn from(text: &str) -> Self {
+        TextField {
+            text: text.to_owned(),
+            cursor: text.len(),
+        }
+    }
+}
+
 /// A one-line text box over a list: what search and the Send picker share.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FilterBox {
-    pub query: String,
+    pub query: TextField,
     /// Index into the list the query gives.
     pub selected: usize,
 }
@@ -95,33 +209,19 @@ enum BoxKey {
 }
 
 impl FilterBox {
-    /// Typing, `Backspace` and `↑`/`↓` over a list of `len` items. Any change
-    /// to the query selects the first item again, and the selection stops at
-    /// both ends. Ctrl- and Alt-modified keys, `Tab`, `BackTab` and every other
-    /// key do nothing. `Enter` and `Esc` are returned for the owner to act on.
+    /// Editing the query (`TextField::on_key`) and `↑`/`↓` over a list of
+    /// `len` items. A change to the query selects the first item again; a
+    /// cursor move, or a `Backspace` or `Delete` that deletes nothing, keeps
+    /// the selection. The selection stops at both ends. `Enter` and `Esc` are
+    /// returned for the owner to act on.
     fn on_key(&mut self, key: KeyEvent, len: usize) -> Option<BoxKey> {
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return None;
-        }
-        match key.code {
-            KeyCode::Enter => return Some(BoxKey::Enter),
-            KeyCode::Esc => return Some(BoxKey::Esc),
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(len.saturating_sub(1)),
-            KeyCode::Backspace => {
-                if self.query.pop().is_some() {
-                    self.selected = 0;
-                }
-            }
-            _ => {
-                if let Some(ch) = typed(key) {
-                    self.query.push(ch);
-                    self.selected = 0;
-                }
-            }
+        match self.query.on_key(key) {
+            Edit::Enter => return Some(BoxKey::Enter),
+            Edit::Esc => return Some(BoxKey::Esc),
+            Edit::Up => self.selected = self.selected.saturating_sub(1),
+            Edit::Down => self.selected = (self.selected + 1).min(len.saturating_sub(1)),
+            Edit::Changed => self.selected = 0,
+            Edit::Unchanged => {}
         }
         None
     }
@@ -255,12 +355,12 @@ pub(crate) struct App {
     pub notif_sel: usize,
     /// The conversation shown on the right of Messaging, opened with Enter.
     pub open_chat: Option<usize>,
-    /// Composer text.
-    pub draft: String,
-    /// Reply box text.
-    pub reply: String,
-    /// The post view's comment box text.
-    pub comment_draft: String,
+    /// Composer text and cursor.
+    pub draft: TextField,
+    /// Reply box text and cursor.
+    pub reply: TextField,
+    /// The post view's comment box text and cursor.
+    pub comment_draft: TextField,
     /// `Some` while the search overlay is open. Takes every key but Ctrl-C.
     pub search: Option<Search>,
     /// `Some` while the Send picker is open. Takes every key but Ctrl-C.
@@ -269,20 +369,6 @@ pub(crate) struct App {
     pub profile_page: Option<ProfilePage>,
     pub status: Option<&'static str>,
     pub should_quit: bool,
-}
-
-/// A key that should be typed into a text box: printable, with no Ctrl or Alt.
-fn typed(key: KeyEvent) -> Option<char> {
-    match key.code {
-        KeyCode::Char(ch)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            Some(ch)
-        }
-        _ => None,
-    }
 }
 
 impl App {
@@ -316,9 +402,9 @@ impl App {
             chat_sel: 0,
             notif_sel: 0,
             open_chat: None,
-            draft: String::new(),
-            reply: String::new(),
-            comment_draft: String::new(),
+            draft: TextField::default(),
+            reply: TextField::default(),
+            comment_draft: TextField::default(),
             search: None,
             send: None,
             profile_page: None,
@@ -624,7 +710,7 @@ impl App {
     /// Alt-modified keys do nothing at all.
     fn on_search_key(&mut self, key: KeyEvent) {
         let hits = match &self.search {
-            Some(search) => self.search_hits(&search.query),
+            Some(search) => self.search_hits(search.query.text()),
             None => return,
         };
         let Some(search) = self.search.as_mut() else {
@@ -789,7 +875,7 @@ impl App {
     /// do nothing at all.
     fn on_send_key(&mut self, key: KeyEvent) {
         let recipients = match &self.send {
-            Some(picker) => self.send_recipients(&picker.query),
+            Some(picker) => self.send_recipients(picker.query.text()),
             None => return,
         };
         let Some(picker) = self.send.as_mut() else {
@@ -848,36 +934,23 @@ impl App {
         self.status = Some("Comment deleted");
     }
 
-    /// The comment box is a text box, like search: Ctrl- and Alt-modified
-    /// keys do nothing at all. `comment` is the comment selected before `c`.
+    /// The comment box is a text box, like search (`TextField::on_key`).
+    /// `comment` is the comment selected before `c`.
     fn on_comment_key(&mut self, key: KeyEvent, comment: usize) {
-        if key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return;
-        }
-        match key.code {
-            KeyCode::Esc => {
+        match self.comment_draft.on_key(key) {
+            Edit::Esc => {
                 self.comment_draft.clear();
                 self.mode = Mode::PostDetail { comment };
             }
-            KeyCode::Enter => self.post_comment(),
-            KeyCode::Backspace => {
-                self.comment_draft.pop();
-            }
-            _ => {
-                if let Some(ch) = typed(key) {
-                    self.comment_draft.push(ch);
-                }
-            }
+            Edit::Enter => self.post_comment(),
+            Edit::Changed | Edit::Unchanged | Edit::Up | Edit::Down => {}
         }
     }
 
     /// Appends the comment box text to the open post as the newest comment,
     /// and selects it.
     fn post_comment(&mut self) {
-        let body = self.comment_draft.trim();
+        let body = self.comment_draft.text().trim();
         if body.is_empty() {
             self.status = Some("Write something first");
             return;
@@ -900,26 +973,20 @@ impl App {
         self.status = Some("Comment posted");
     }
 
+    /// The composer is a text box, like search (`TextField::on_key`).
     fn on_composer_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        match self.draft.on_key(key) {
+            Edit::Esc => {
                 self.draft.clear();
                 self.mode = Mode::Browse;
             }
-            KeyCode::Enter => self.publish(),
-            KeyCode::Backspace => {
-                self.draft.pop();
-            }
-            _ => {
-                if let Some(ch) = typed(key) {
-                    self.draft.push(ch);
-                }
-            }
+            Edit::Enter => self.publish(),
+            Edit::Changed | Edit::Unchanged | Edit::Up | Edit::Down => {}
         }
     }
 
     fn publish(&mut self) {
-        let body = self.draft.trim();
+        let body = self.draft.text().trim();
         if body.is_empty() {
             self.status = Some("Write something first");
             return;
@@ -1045,14 +1112,15 @@ impl App {
         }
     }
 
+    /// The reply box is a text box, like search (`TextField::on_key`).
     fn on_reply_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        match self.reply.on_key(key) {
+            Edit::Esc => {
                 self.reply.clear();
                 self.mode = Mode::Browse;
             }
-            KeyCode::Enter => {
-                let body = self.reply.trim();
+            Edit::Enter => {
+                let body = self.reply.text().trim();
                 if let Some(chat) = self.open_chat.and_then(|i| self.conversations.get_mut(i))
                     && !body.is_empty()
                 {
@@ -1064,14 +1132,7 @@ impl App {
                     self.reply.clear();
                 }
             }
-            KeyCode::Backspace => {
-                self.reply.pop();
-            }
-            _ => {
-                if let Some(ch) = typed(key) {
-                    self.reply.push(ch);
-                }
-            }
+            Edit::Changed | Edit::Unchanged | Edit::Up | Edit::Down => {}
         }
     }
 }
@@ -1091,7 +1152,7 @@ mod tests {
     }
 
     fn query(app: &App) -> Option<&str> {
-        app.search.as_ref().map(|s| s.query.as_str())
+        app.search.as_ref().map(|s| s.query.text())
     }
 
     fn selected_hit(app: &App) -> usize {
@@ -1209,7 +1270,7 @@ mod tests {
         let comments = app.posts[0].comments.len();
 
         type_str(&mut app, "q1jklcp/ 5");
-        assert_eq!(app.comment_draft, "q1jklcp/ 5");
+        assert_eq!(app.comment_draft.text(), "q1jklcp/ 5");
         assert!(!app.should_quit, "q is typed, not quit");
         assert_eq!(snapshot(&app), before, "1, 5, j and k are typed");
         assert_eq!(app.mode, Mode::CommentBox { comment: 1 });
@@ -1222,17 +1283,21 @@ mod tests {
 
         // Shift is fine.
         app.on_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT));
-        assert_eq!(app.comment_draft, "q1jklcp/ 5Q");
+        assert_eq!(app.comment_draft.text(), "q1jklcp/ 5Q");
 
-        // Tab, BackTab, arrows and Ctrl- or Alt-modified keys do nothing.
-        for code in [
-            KeyCode::Tab,
-            KeyCode::BackTab,
-            KeyCode::Up,
-            KeyCode::Down,
-            KeyCode::Left,
-            KeyCode::Right,
-        ] {
+        // `←`/`→` move the cursor and change nothing else.
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.comment_draft.cursor(), 10, "before the Q");
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.comment_draft.cursor(), 10);
+        assert_eq!(app.comment_draft.text(), "q1jklcp/ 5Q");
+        assert_eq!(snapshot(&app), before, "no comment moved");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.comment_draft.cursor(), 11, "back at the end");
+
+        // Tab, BackTab, `↑`/`↓` and Ctrl- or Alt-modified keys do nothing.
+        for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Up, KeyCode::Down] {
             press(&mut app, code);
         }
         for (code, modifiers) in [
@@ -1244,17 +1309,20 @@ mod tests {
             (KeyCode::Enter, KeyModifiers::ALT),
             (KeyCode::Esc, KeyModifiers::CONTROL),
             (KeyCode::Char('1'), KeyModifiers::ALT),
+            (KeyCode::Left, KeyModifiers::CONTROL),
+            (KeyCode::Home, KeyModifiers::ALT),
         ] {
             app.on_key(KeyEvent::new(code, modifiers));
         }
-        assert_eq!(app.comment_draft, "q1jklcp/ 5Q");
+        assert_eq!(app.comment_draft.text(), "q1jklcp/ 5Q");
+        assert_eq!(app.comment_draft.cursor(), 11);
         assert_eq!(snapshot(&app), before);
         assert_eq!(app.posts[0].comments.len(), comments);
         assert!(app.status.is_none());
 
         // Backspace deletes, and on an empty draft keeps focus.
         press(&mut app, KeyCode::Backspace);
-        assert_eq!(app.comment_draft, "q1jklcp/ 5");
+        assert_eq!(app.comment_draft.text(), "q1jklcp/ 5");
         for _ in 0..20 {
             press(&mut app, KeyCode::Backspace);
         }
@@ -1444,7 +1512,7 @@ mod tests {
         // Your own comment is selected, and x still only types.
         press(&mut app, KeyCode::Char('c'));
         type_str(&mut app, "x-ray");
-        assert_eq!(app.comment_draft, "x-ray");
+        assert_eq!(app.comment_draft.text(), "x-ray");
         assert_eq!(app.mode, Mode::CommentBox { comment: 3 });
         assert_eq!(app.posts[0].comments.len(), 4);
         assert!(app.status.is_none());
@@ -1462,13 +1530,13 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.status, Some("Write something first"));
         assert_eq!(app.mode, Mode::CommentBox { comment: 0 }, "keeps focus");
-        assert_eq!(app.comment_draft, "   ", "and the draft");
+        assert_eq!(app.comment_draft.text(), "   ", "and the draft");
         assert_eq!(app.posts[0].comments.len(), 3);
 
         // The toast clears on the next key, which is typed.
         type_str(&mut app, "ok");
         assert!(app.status.is_none());
-        assert_eq!(app.comment_draft, "   ok");
+        assert_eq!(app.comment_draft.text(), "   ok");
     }
 
     #[test]
@@ -1556,7 +1624,7 @@ mod tests {
         assert_eq!(app.mode, Mode::Composer);
 
         type_str(&mut app, "q1jl axcse");
-        assert_eq!(app.draft, "q1jl axcse");
+        assert_eq!(app.draft.text(), "q1jl axcse");
         assert!(!app.should_quit, "q is typed, not quit");
         assert_eq!(app.tab, Tab::Home, "1 is typed, not a tab switch");
         assert_eq!(app.post_sel, 0, "j is typed, not a move");
@@ -1564,7 +1632,7 @@ mod tests {
         assert!(!app.posts[0].liked);
 
         press(&mut app, KeyCode::Backspace);
-        assert_eq!(app.draft, "q1jl axcs");
+        assert_eq!(app.draft.text(), "q1jl axcs");
 
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.tab, Tab::Home, "Tab doesn't switch tabs while typing");
@@ -1953,7 +2021,7 @@ mod tests {
         let mut app = App::new();
         press(&mut app, KeyCode::Char('p'));
         type_str(&mut app, "a/b");
-        assert_eq!(app.draft, "a/b");
+        assert_eq!(app.draft.text(), "a/b");
         assert!(app.search.is_none());
         assert_eq!(app.mode, Mode::Composer);
 
@@ -1961,7 +2029,7 @@ mod tests {
         press(&mut app, KeyCode::Char('4'));
         press(&mut app, KeyCode::Enter);
         type_str(&mut app, "and/or");
-        assert_eq!(app.reply, "and/or");
+        assert_eq!(app.reply.text(), "and/or");
         assert!(app.search.is_none());
         assert_eq!(app.mode, Mode::Reply);
     }
@@ -2214,7 +2282,7 @@ mod tests {
     }
 
     fn filter(app: &App) -> Option<&str> {
-        app.send.as_ref().map(|p| p.query.as_str())
+        app.send.as_ref().map(|p| p.query.text())
     }
 
     fn selected_recipient(app: &App) -> usize {
@@ -2247,7 +2315,7 @@ mod tests {
     type Unsent = (
         Vec<(&'static str, bool)>,
         usize,
-        String,
+        TextField,
         Vec<(u32, bool, Vec<String>)>,
     );
 
@@ -2348,13 +2416,13 @@ mod tests {
         let mut app = App::new();
         press(&mut app, KeyCode::Char('p'));
         type_str(&mut app, "s");
-        assert_eq!((app.draft.as_str(), app.mode), ("s", Mode::Composer));
+        assert_eq!((app.draft.text(), app.mode), ("s", Mode::Composer));
         assert!(app.send.is_none());
 
         let mut app = maren_post_view();
         press(&mut app, KeyCode::Char('c'));
         type_str(&mut app, "s");
-        assert_eq!(app.comment_draft, "s");
+        assert_eq!(app.comment_draft.text(), "s");
         assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
         assert!(app.send.is_none());
 
@@ -2362,7 +2430,7 @@ mod tests {
         press(&mut app, KeyCode::Char('4'));
         press(&mut app, KeyCode::Enter);
         type_str(&mut app, "s");
-        assert_eq!((app.reply.as_str(), app.mode), ("s", Mode::Reply));
+        assert_eq!((app.reply.text(), app.mode), ("s", Mode::Reply));
         assert!(app.send.is_none());
 
         let mut app = App::new();
@@ -2516,7 +2584,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Char('1'));
-        app.reply = "half a reply".to_owned();
+        app.reply = TextField::from("half a reply");
         assert_eq!((app.chat_sel, app.open_chat), (2, Some(2)));
         assert_eq!(app.badge(Tab::Messaging), 2);
 
@@ -2539,7 +2607,7 @@ mod tests {
         assert_eq!(app.mode, Mode::PostDetail { comment: 1 });
         assert_eq!(unsent(&app), kept);
         assert_eq!(app.badge(Tab::Messaging), 2);
-        assert_eq!(app.reply, "half a reply");
+        assert_eq!(app.reply.text(), "half a reply");
         let after = messages(&app);
         assert_eq!(app.conversations[3].name, "Felix Abernathy");
         for (i, (was, now)) in sent.iter().zip(&after).enumerate() {
@@ -2872,7 +2940,7 @@ mod tests {
     #[test]
     fn enter_on_a_conversation_opens_it_like_messaging_does() {
         let mut app = App::new();
-        app.reply = "a stale draft".to_owned();
+        app.reply = TextField::from("a stale draft");
         assert_eq!(app.badge(Tab::Messaging), 2);
         assert!(app.conversations[1].unread);
         assert_eq!(
@@ -2900,12 +2968,12 @@ mod tests {
 
         // The same as Enter on it in Messaging.
         let mut by_hand = App::new();
-        by_hand.reply = "a stale draft".to_owned();
+        by_hand.reply = TextField::from("a stale draft");
         press(&mut by_hand, KeyCode::Char('4'));
         press(&mut by_hand, KeyCode::Char('j'));
         press(&mut by_hand, KeyCode::Enter);
         let mut found = App::new();
-        found.reply = "a stale draft".to_owned();
+        found.reply = TextField::from("a stale draft");
         jump(&mut found, "agenda", 2);
         assert_eq!(snapshot(&found), snapshot(&by_hand));
         assert_eq!(found.reply, by_hand.reply);
@@ -3031,7 +3099,7 @@ mod tests {
         Vec<(bool, bool)>,
         Unsent,
         (usize, usize),
-        (String, String),
+        (TextField, TextField),
         (bool, bool, Option<&'static str>, bool),
     );
 
@@ -3275,14 +3343,14 @@ mod tests {
         press(&mut app, KeyCode::Char('1'));
         press(&mut app, KeyCode::Char('p'));
         type_jk(&mut app);
-        assert_eq!((app.draft.as_str(), app.mode), ("JK", Mode::Composer));
+        assert_eq!((app.draft.text(), app.mode), ("JK", Mode::Composer));
 
         let mut app = scrolled();
         press(&mut app, KeyCode::Char('1'));
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Char('c'));
         type_jk(&mut app);
-        assert_eq!(app.comment_draft, "JK");
+        assert_eq!(app.comment_draft.text(), "JK");
         assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
 
         for keys in [&[][..], &[KeyCode::Enter]] {
@@ -3300,7 +3368,7 @@ mod tests {
         press(&mut app, KeyCode::Char('4'));
         press(&mut app, KeyCode::Enter);
         type_jk(&mut app);
-        assert_eq!((app.reply.as_str(), app.mode), ("JK", Mode::Reply));
+        assert_eq!((app.reply.text(), app.mode), ("JK", Mode::Reply));
     }
 
     /// The author of the post behind each feed card, `+` marking a repost.
@@ -3721,14 +3789,14 @@ mod tests {
         let mut app = App::new();
         press(&mut app, KeyCode::Char('p'));
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!((app.draft.as_str(), app.mode), ("r", Mode::Composer));
+        assert_eq!((app.draft.text(), app.mode), ("r", Mode::Composer));
         assert!(!reposted(&app));
         assert_feed_matches_posts(&app);
 
         let mut app = maren_post_view();
         press(&mut app, KeyCode::Char('c'));
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!(app.comment_draft, "r");
+        assert_eq!(app.comment_draft.text(), "r");
         assert_eq!(app.mode, Mode::CommentBox { comment: 0 });
         assert!(!reposted(&app));
         assert_feed_matches_posts(&app);
@@ -3751,7 +3819,7 @@ mod tests {
         press(&mut app, KeyCode::Char('4'));
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Char('r'));
-        assert_eq!((app.reply.as_str(), app.mode), ("r", Mode::Reply));
+        assert_eq!((app.reply.text(), app.mode), ("r", Mode::Reply));
         assert!(!reposted(&app));
         assert_feed_matches_posts(&app);
     }
@@ -3775,7 +3843,7 @@ mod tests {
         Vec<bool>,
         u32,
         Vec<(bool, usize)>,
-        [String; 3],
+        [TextField; 3],
     );
 
     fn world(app: &App) -> World {
@@ -4170,7 +4238,7 @@ mod tests {
     #[test]
     fn m_opens_the_conversation_like_messaging_does() {
         let mut app = App::new();
-        app.reply = "a stale draft".to_owned();
+        app.reply = TextField::from("a stale draft");
         select_card(&mut app, "Ravi Tenorio", false);
         press(&mut app, KeyCode::Char('v'));
         assert_eq!(
@@ -4185,7 +4253,7 @@ mod tests {
         assert_eq!(app.badge(Tab::Messaging), 1);
 
         let mut by_hand = App::new();
-        by_hand.reply = "a stale draft".to_owned();
+        by_hand.reply = TextField::from("a stale draft");
         select_card(&mut by_hand, "Ravi Tenorio", false);
         press(&mut by_hand, KeyCode::Char('4'));
         press(&mut by_hand, KeyCode::Char('j'));
@@ -4337,14 +4405,14 @@ mod tests {
         let mut app = App::new();
         press(&mut app, KeyCode::Char('p'));
         type_str(&mut app, "vm");
-        assert_eq!(app.draft, "vm");
+        assert_eq!(app.draft.text(), "vm");
         assert_eq!(viewing(&app), None);
 
         // The comment box.
         let mut app = maren_post_view();
         press(&mut app, KeyCode::Char('c'));
         type_str(&mut app, "vm");
-        assert_eq!(app.comment_draft, "vm");
+        assert_eq!(app.comment_draft.text(), "vm");
         assert_eq!(viewing(&app), None);
 
         // The reply box.
@@ -4352,7 +4420,7 @@ mod tests {
         press(&mut app, KeyCode::Char('4'));
         press(&mut app, KeyCode::Enter);
         type_str(&mut app, "vm");
-        assert_eq!(app.reply, "vm");
+        assert_eq!(app.reply.text(), "vm");
         assert_eq!((viewing(&app), app.tab), (None, Tab::Messaging));
 
         // Search, on every tab, over the post view and over a profile.
@@ -4468,6 +4536,567 @@ mod tests {
             .chain(app.conversations.iter().map(|c| c.name))
         {
             assert_eq!(app.degree(name), Some(Degree::First), "{name}");
+        }
+    }
+
+    // ------------------------------------------------------------ Text boxes
+
+    fn edit(field: &mut TextField, code: KeyCode) -> Edit {
+        field.on_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn at(field: &TextField) -> (&str, usize) {
+        (field.text(), field.cursor())
+    }
+
+    #[test]
+    fn a_text_field_edits_at_the_cursor() {
+        let mut f = TextField::default();
+        assert_eq!(at(&f), ("", 0));
+        for ch in "helo".chars() {
+            assert_eq!(edit(&mut f, KeyCode::Char(ch)), Edit::Changed);
+        }
+        assert_eq!(at(&f), ("helo", 4));
+        assert_eq!(edit(&mut f, KeyCode::Left), Edit::Unchanged);
+        assert_eq!(edit(&mut f, KeyCode::Char('l')), Edit::Changed);
+        assert_eq!(at(&f), ("hello", 4), "typed before the o, cursor past it");
+        edit(&mut f, KeyCode::Home);
+        for ch in "Oh, ".chars() {
+            edit(&mut f, KeyCode::Char(ch));
+        }
+        assert_eq!(at(&f), ("Oh, hello", 4));
+        edit(&mut f, KeyCode::End);
+        assert_eq!(at(&f), ("Oh, hello", 9));
+
+        // Backspace and Delete in the middle.
+        let mut f = TextField::from("abcdef");
+        assert_eq!(at(&f), ("abcdef", 6), "from() puts the cursor at the end");
+        edit(&mut f, KeyCode::Home);
+        for _ in 0..3 {
+            edit(&mut f, KeyCode::Right);
+        }
+        assert_eq!(edit(&mut f, KeyCode::Backspace), Edit::Changed);
+        assert_eq!(at(&f), ("abdef", 2));
+        assert_eq!(edit(&mut f, KeyCode::Delete), Edit::Changed);
+        assert_eq!(at(&f), ("abef", 2));
+
+        // Nothing to delete or move to past either end.
+        edit(&mut f, KeyCode::Home);
+        assert_eq!(edit(&mut f, KeyCode::Backspace), Edit::Unchanged);
+        assert_eq!(edit(&mut f, KeyCode::Left), Edit::Unchanged);
+        assert_eq!(at(&f), ("abef", 0));
+        edit(&mut f, KeyCode::End);
+        assert_eq!(edit(&mut f, KeyCode::Delete), Edit::Unchanged);
+        assert_eq!(edit(&mut f, KeyCode::Right), Edit::Unchanged);
+        assert_eq!(at(&f), ("abef", 4));
+
+        // The owner's keys come back untouched.
+        for (code, back) in [
+            (KeyCode::Enter, Edit::Enter),
+            (KeyCode::Esc, Edit::Esc),
+            (KeyCode::Up, Edit::Up),
+            (KeyCode::Down, Edit::Down),
+            (KeyCode::Tab, Edit::Unchanged),
+            (KeyCode::BackTab, Edit::Unchanged),
+        ] {
+            assert_eq!(edit(&mut f, code), back, "{code:?}");
+            assert_eq!(at(&f), ("abef", 4), "{code:?}");
+        }
+
+        // Ctrl- and Alt-modified keys do nothing, the arrows included.
+        edit(&mut f, KeyCode::Left);
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for code in [
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::Delete,
+                KeyCode::Backspace,
+                KeyCode::Char('x'),
+                KeyCode::Enter,
+                KeyCode::Esc,
+                KeyCode::Up,
+            ] {
+                assert_eq!(
+                    f.on_key(KeyEvent::new(code, modifiers)),
+                    Edit::Unchanged,
+                    "{modifiers:?} {code:?}"
+                );
+                assert_eq!(at(&f), ("abef", 3), "{modifiers:?} {code:?}");
+            }
+        }
+        // Shift is fine.
+        f.on_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert_eq!(at(&f), ("abeXf", 4));
+    }
+
+    #[test]
+    fn a_double_width_character_is_one_step() {
+        let mut f = TextField::from("a日b");
+        edit(&mut f, KeyCode::Home);
+        edit(&mut f, KeyCode::Right);
+        assert_eq!(at(&f), ("a日b", 1));
+        edit(&mut f, KeyCode::Right);
+        assert_eq!(at(&f), ("a日b", 4), "over 日 in one step");
+        edit(&mut f, KeyCode::Left);
+        assert_eq!(at(&f), ("a日b", 1), "and back");
+        edit(&mut f, KeyCode::Delete);
+        assert_eq!(at(&f), ("ab", 1), "日 deleted whole");
+        edit(&mut f, KeyCode::Char('日'));
+        assert_eq!(at(&f), ("a日b", 4));
+        edit(&mut f, KeyCode::Backspace);
+        assert_eq!(at(&f), ("ab", 1), "日 deleted whole");
+
+        // Every key from every cursor position over characters of 1 to 4
+        // bytes keeps the cursor on a `char` boundary, without panicking.
+        let text = "日a本é語b\u{1D11E}";
+        let chars = text.chars().count();
+        for start in 0..=chars {
+            for code in [
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::Backspace,
+                KeyCode::Delete,
+                KeyCode::Char('x'),
+                KeyCode::Char('字'),
+            ] {
+                let mut f = TextField::from(text);
+                edit(&mut f, KeyCode::Home);
+                for _ in 0..start {
+                    edit(&mut f, KeyCode::Right);
+                }
+                assert_eq!(f.text()[..f.cursor()].chars().count(), start);
+                edit(&mut f, code);
+                assert!(
+                    f.cursor() <= f.text().len() && f.text().is_char_boundary(f.cursor()),
+                    "{code:?} from {start}: {} in {:?}",
+                    f.cursor(),
+                    f.text()
+                );
+            }
+        }
+    }
+
+    fn draft_of(app: &App) -> &TextField {
+        &app.draft
+    }
+
+    fn comment_draft_of(app: &App) -> &TextField {
+        &app.comment_draft
+    }
+
+    fn reply_of(app: &App) -> &TextField {
+        &app.reply
+    }
+
+    fn query_of(app: &App) -> &TextField {
+        &app.search.as_ref().expect("search is open").query
+    }
+
+    fn filter_of(app: &App) -> &TextField {
+        &app.send.as_ref().expect("the picker is open").query
+    }
+
+    /// The five text boxes, each just opened on the seed: its name, the app,
+    /// how to read its field, and whether `↑`/`↓` move a list under it.
+    type TextBox = (&'static str, App, fn(&App) -> &TextField, bool);
+
+    fn text_boxes() -> Vec<TextBox> {
+        let open = |keys: &[KeyCode]| {
+            let mut app = App::new();
+            for &code in keys {
+                press(&mut app, code);
+            }
+            app
+        };
+        vec![
+            ("composer", open(&[KeyCode::Char('p')]), draft_of, false),
+            (
+                "comment box",
+                open(&[KeyCode::Enter, KeyCode::Char('c')]),
+                comment_draft_of,
+                false,
+            ),
+            (
+                "reply box",
+                open(&[KeyCode::Char('4'), KeyCode::Enter]),
+                reply_of,
+                false,
+            ),
+            ("search", open(&[KeyCode::Char('/')]), query_of, true),
+            ("send picker", open(&[KeyCode::Char('s')]), filter_of, true),
+        ]
+    }
+
+    #[test]
+    fn every_text_box_moves_the_cursor_and_edits_in_the_middle() {
+        for (name, mut app, field, _) in text_boxes() {
+            let before = snapshot(&app);
+            let mode = app.mode;
+            let at = |app: &App| (field(app).text().to_owned(), field(app).cursor());
+            let is = |text: &str, cursor: usize| (text.to_owned(), cursor);
+            assert_eq!(at(&app), is("", 0), "{name} opens empty");
+
+            // `←` then typing inserts in the middle.
+            type_str(&mut app, "helo");
+            press(&mut app, KeyCode::Left);
+            type_str(&mut app, "l");
+            assert_eq!(at(&app), is("hello", 4), "{name}");
+            // `Home` then typing inserts at the start, `End` goes back.
+            press(&mut app, KeyCode::Home);
+            type_str(&mut app, "Oh, ");
+            assert_eq!(at(&app), is("Oh, hello", 4), "{name}");
+            press(&mut app, KeyCode::End);
+            assert_eq!(at(&app), is("Oh, hello", 9), "{name}");
+
+            // `Backspace` and `Delete` in the middle.
+            press(&mut app, KeyCode::Home);
+            for _ in 0..3 {
+                press(&mut app, KeyCode::Right);
+            }
+            press(&mut app, KeyCode::Backspace);
+            assert_eq!(at(&app), is("Oh hello", 2), "{name}: the comma");
+            press(&mut app, KeyCode::Delete);
+            assert_eq!(at(&app), is("Ohhello", 2), "{name}: the space");
+
+            // At the start, `Backspace` and `←` change nothing; at the end,
+            // `Delete` and `→` don't.
+            press(&mut app, KeyCode::Home);
+            press(&mut app, KeyCode::Backspace);
+            press(&mut app, KeyCode::Left);
+            assert_eq!(at(&app), is("Ohhello", 0), "{name}");
+            press(&mut app, KeyCode::End);
+            press(&mut app, KeyCode::Delete);
+            press(&mut app, KeyCode::Right);
+            assert_eq!(at(&app), is("Ohhello", 7), "{name}");
+
+            // `日` is one step, and deleted whole either way.
+            press(&mut app, KeyCode::Home);
+            type_str(&mut app, "日");
+            assert_eq!(at(&app), is("日Ohhello", 3), "{name}");
+            press(&mut app, KeyCode::Left);
+            assert_eq!(at(&app), is("日Ohhello", 0), "{name}");
+            press(&mut app, KeyCode::Right);
+            assert_eq!(at(&app), is("日Ohhello", 3), "{name}");
+            press(&mut app, KeyCode::Backspace);
+            assert_eq!(at(&app), is("Ohhello", 0), "{name}");
+            type_str(&mut app, "日");
+            press(&mut app, KeyCode::Home);
+            press(&mut app, KeyCode::Delete);
+            assert_eq!(at(&app), is("Ohhello", 0), "{name}");
+
+            // Ctrl- and Alt-modified editing keys, `Tab` and `BackTab` do
+            // nothing.
+            press(&mut app, KeyCode::Right);
+            for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+                for code in [
+                    KeyCode::Left,
+                    KeyCode::Right,
+                    KeyCode::Home,
+                    KeyCode::End,
+                    KeyCode::Delete,
+                    KeyCode::Backspace,
+                ] {
+                    app.on_key(KeyEvent::new(code, modifiers));
+                }
+            }
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::BackTab);
+            assert_eq!(at(&app), is("Ohhello", 1), "{name}");
+
+            assert_eq!(snapshot(&app), before, "{name}: nothing else moved");
+            assert_eq!(app.mode, mode, "{name}");
+            assert!(app.status.is_none() && !app.should_quit, "{name}");
+        }
+    }
+
+    #[test]
+    fn up_and_down_do_nothing_in_the_composer_comment_and_reply_boxes() {
+        for (name, mut app, field, lists) in text_boxes() {
+            if lists {
+                continue;
+            }
+            type_str(&mut app, "abc");
+            press(&mut app, KeyCode::Left);
+            let before = (snapshot(&app), field(&app).clone());
+            press(&mut app, KeyCode::Up);
+            press(&mut app, KeyCode::Down);
+            assert_eq!((snapshot(&app), field(&app).clone()), before, "{name}");
+        }
+    }
+
+    #[test]
+    fn edits_in_the_middle_are_what_gets_submitted() {
+        // The composer publishes the edited draft.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        type_str(&mut app, "Helo world");
+        for _ in 0..7 {
+            press(&mut app, KeyCode::Left);
+        }
+        type_str(&mut app, "l");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.posts[0].body, "Hello world");
+        assert_eq!(app.posts[0].author, "Jordan Vale");
+        assert_eq!(app.status, Some("Post published"));
+
+        // The comment box posts the edited comment.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "Grat post ");
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        type_str(&mut app, "e");
+        press(&mut app, KeyCode::Enter);
+        let mine = app.posts[0].comments.last().expect("just posted");
+        assert_eq!(mine.body, "Great post", "edited, then trimmed");
+        assert_eq!(app.status, Some("Comment posted"));
+
+        // The reply box sends the edited reply.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "See yo there");
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Left);
+        }
+        type_str(&mut app, "u");
+        press(&mut app, KeyCode::Enter);
+        let last = app.conversations[0].messages.last().expect("just sent");
+        assert!(last.from_me);
+        assert_eq!(last.body, "See you there");
+
+        // Search opens the result of the edited query.
+        let mut typed = App::new();
+        press(&mut typed, KeyCode::Char('/'));
+        type_str(&mut typed, "lisbon");
+        let mut edited = App::new();
+        press(&mut edited, KeyCode::Char('/'));
+        type_str(&mut edited, "lisbn");
+        press(&mut edited, KeyCode::Left);
+        type_str(&mut edited, "o");
+        assert_eq!(query(&edited), Some("lisbon"));
+        press(&mut typed, KeyCode::Enter);
+        press(&mut edited, KeyCode::Enter);
+        assert_eq!(edited.tab, Tab::Jobs);
+        assert_eq!(snapshot(&edited), snapshot(&typed));
+
+        // The Send picker sends to the recipient the edited filter selects.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "flix");
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Right);
+        type_str(&mut app, "e");
+        assert_eq!(filter(&app), Some("felix"));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Post sent"));
+        let felix = app
+            .conversations
+            .iter()
+            .find(|c| c.name == "Felix Abernathy")
+            .expect("Felix is in the seed");
+        let last = felix.messages.last().expect("just sent");
+        assert!(last.body.starts_with("Shared a post by Maren Holt: "));
+    }
+
+    #[test]
+    fn only_a_real_change_to_the_query_selects_the_first_result_again() {
+        let boxes = [
+            ('/', "bright", selected_hit as fn(&App) -> usize),
+            ('s', "o", selected_recipient),
+        ];
+        for (open, text, selected) in boxes {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(open));
+            type_str(&mut app, text);
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Down);
+            assert_eq!(selected(&app), 2, "{text}");
+
+            // Moving the cursor, and deleting nothing, keep the selection.
+            for code in [
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Home,
+                KeyCode::Backspace,
+                KeyCode::Left,
+                KeyCode::End,
+                KeyCode::Delete,
+                KeyCode::Right,
+            ] {
+                press(&mut app, code);
+                assert_eq!(selected(&app), 2, "{text}: {code:?}");
+            }
+
+            // An edit in the middle selects the first result again.
+            press(&mut app, KeyCode::Left);
+            type_str(&mut app, "x");
+            assert_eq!(selected(&app), 0, "{text}: typed in the middle");
+            press(&mut app, KeyCode::Backspace);
+            assert_eq!(selected(&app), 0);
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Down);
+            assert_eq!(selected(&app), 2);
+            press(&mut app, KeyCode::Home);
+            press(&mut app, KeyCode::Delete);
+            assert_eq!(selected(&app), 0, "{text}: deleted at the start");
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Backspace);
+            assert_eq!(selected(&app), 1, "{text}: nothing before the cursor");
+        }
+    }
+
+    #[test]
+    fn every_box_opens_empty_with_the_cursor_at_0() {
+        let fresh = TextField::default();
+        let half = |app: &mut App| {
+            type_str(app, "half");
+            press(app, KeyCode::Left);
+            press(app, KeyCode::Left);
+        };
+
+        // The composer, after Esc, on reopening and after publishing.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('p'));
+        half(&mut app);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.draft, fresh);
+        press(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.draft, fresh);
+        half(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Post published"));
+        assert_eq!(app.draft, fresh);
+
+        // The comment box.
+        let mut app = maren_post_view();
+        press(&mut app, KeyCode::Char('c'));
+        half(&mut app);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.comment_draft, fresh);
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.comment_draft, fresh);
+        half(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status, Some("Comment posted"));
+        assert_eq!(app.comment_draft, fresh);
+
+        // The reply box, also when a conversation opens over a stale draft,
+        // from Messaging and from search.
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        half(&mut app);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.reply, fresh);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.reply, fresh);
+        half(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.conversations[0]
+                .messages
+                .last()
+                .map(|m| m.body.as_str()),
+            Some("half")
+        );
+        assert_eq!(app.reply, fresh);
+        press(&mut app, KeyCode::Esc);
+        app.reply = TextField::from("a stale draft");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.reply, fresh);
+        press(&mut app, KeyCode::Esc);
+        app.reply = TextField::from("a stale draft");
+        press(&mut app, KeyCode::Char('/'));
+        // Ravi Tenorio's conversation is `agenda`'s third result.
+        type_str(&mut app, "agenda");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!((app.mode, app.open_chat), (Mode::Reply, Some(1)));
+        assert_eq!(app.reply, fresh);
+
+        // Search and the Send picker, after Esc and after Enter.
+        for open in ['/', 's'] {
+            let picker = |app: &App| {
+                if open == '/' {
+                    app.search.as_ref().map(|s| s.query.clone())
+                } else {
+                    app.send.as_ref().map(|p| p.query.clone())
+                }
+            };
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(open));
+            assert_eq!(picker(&app), Some(fresh.clone()));
+            type_str(&mut app, "maren");
+            press(&mut app, KeyCode::Left);
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(picker(&app), None);
+            press(&mut app, KeyCode::Char(open));
+            assert_eq!(picker(&app), Some(fresh.clone()), "{open}: reopened");
+            type_str(&mut app, "maren");
+            press(&mut app, KeyCode::Left);
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(picker(&app), None, "{open}: Enter closes it");
+            press(&mut app, KeyCode::Char('1'));
+            press(&mut app, KeyCode::Esc);
+            press(&mut app, KeyCode::Char(open));
+            assert_eq!(picker(&app), Some(fresh.clone()), "{open}: after Enter");
+        }
+    }
+
+    #[test]
+    fn left_right_home_end_and_delete_do_nothing_outside_the_text_boxes() {
+        let at = |keys: &[KeyCode]| {
+            let mut app = App::new();
+            for &code in keys {
+                press(&mut app, code);
+            }
+            app
+        };
+        let states = [
+            ("home", at(&[KeyCode::Char('j')])),
+            (
+                "post view",
+                at(&[KeyCode::Enter, KeyCode::Char('j'), KeyCode::Char('j')]),
+            ),
+            ("network", at(&[KeyCode::Char('2'), KeyCode::Char('j')])),
+            ("jobs", at(&[KeyCode::Char('3'), KeyCode::Char('j')])),
+            ("messaging", at(&[KeyCode::Char('4'), KeyCode::Char('j')])),
+            (
+                "messaging, thread open",
+                at(&[KeyCode::Char('4'), KeyCode::Enter, KeyCode::Esc]),
+            ),
+            ("notifications", at(&[KeyCode::Char('5')])),
+            ("profile", at(&[KeyCode::Char('v')])),
+            ("own profile", {
+                let mut app = at(&[KeyCode::Char('p')]);
+                type_str(&mut app, "hello");
+                press(&mut app, KeyCode::Enter);
+                press(&mut app, KeyCode::Char('v'));
+                app
+            }),
+        ];
+        for (name, mut app) in states {
+            app.status = None;
+            let before = (world(&app), app.profile_page);
+            for code in [
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::Delete,
+            ] {
+                press(&mut app, code);
+                assert_eq!((world(&app), app.profile_page), before, "{name}: {code:?}");
+                assert!(app.search.is_none() && app.send.is_none(), "{name}");
+                assert!(app.status.is_none() && !app.should_quit, "{name}");
+            }
         }
     }
 }

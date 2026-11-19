@@ -20,7 +20,10 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
   to messages, and clearing notifications. `/` searches people, jobs, posts,
   comments and messages and jumps to the result. `v` opens the profile of
   the person under the selection: who they are, what they've done and what
-  they've posted, in one place.
+  they've posted, in one place. Every text box (the composer, the comment
+  and reply boxes, search and the Send picker) has a cursor you move with
+  `←`/`→`, `Home` and `End`, so a typo is fixed where it is, not by deleting
+  back to it.
 - One self-contained binary. No network, no files written at runtime and no
   real data: all content is hard-coded, fictional and safe for work.
 
@@ -108,7 +111,9 @@ composer, the reply box, the comment box, the search box or the Send
 picker's filter, so everything in `ui.rs` that
 wraps, truncates or measures text uses display width (`width_of`, which is
 ratatui's `Span::width`), never the `char` count. `head` and `tail` keep the longest
-start or end of a string that fits in N columns. `hard_wrap` splits typed text
+start or end of a string that fits in N columns. `around_cursor` picks the
+part of a one-line box's text to show around the cursor (see "Text boxes"
+below). `hard_wrap` splits typed text
 into rows of at most N columns, giving a character wider than the row a row of
 its own. `wrap` and `truncate` are built on them. Seed text is single width,
 so for it the two measures agree.
@@ -141,10 +146,10 @@ The screen is a header (3 rows), a body, and a footer (1 row).
 - **Footer:** key hints for the current tab and mode. A toast replaces them
   (white on blue) until the next key press. Every hint set fits on one line at
   80 columns. **A hint names only a key that does something right now.**
-  Most sets are fixed: Home, comment box, composer, My Network, Jobs,
-  Messaging list, reply box, Notifications, search and the Send picker.
-  The post view's (`post_view_hints`) and a profile's (`profile_hints`,
-  below) are built from the current state. Jobs reads
+  Most sets are fixed: Home, My Network, Jobs, Messaging list and
+  Notifications. The post view's (`post_view_hints`), a profile's
+  (`profile_hints`, below) and the five text boxes' (`text_box_hints`) are
+  built from the current state. Jobs reads
   `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
   (72 columns with the padding). Home reads
   `j/k move  l like  enter open  p post  r repost  s send  v profile  q quit`
@@ -173,6 +178,24 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     - `j/k comments` shows only when the post has two comments or more, since
       with one or none `j` and `k` don't move anything: Lucia Brandt's post
       reads `l like  c comment  r repost  s send  v profile  esc back  q quit`.
+  - **The text boxes' footers** are fixed sets plus `←/→ cursor`, last,
+    once the box holds text: in an empty box the arrows have nowhere to go,
+    as `j/k comments` needs two comments. It says `cursor`, not `move`,
+    because search and the Send picker already say `↑/↓ move` for their
+    results. Going last, it is the first thing a narrow footer cuts, so a
+    footer too narrow for it reads as it did before the cursor could move
+    (the reason `J/K scroll` is last on Jobs). With text the composer reads
+    `type write  backspace delete  enter publish  esc discard  ←/→ cursor`
+    (70), the comment box
+    `type write  backspace delete  enter post  esc cancel  ←/→ cursor` (66),
+    the reply box
+    `type write  backspace delete  enter send  esc back to list  ←/→ cursor`
+    (72), search `type search  ↑/↓ move  enter open  esc close  ←/→ cursor`
+    (58) and the Send picker
+    `type filter  ↑/↓ move  enter send  esc cancel  ←/→ cursor` (59).
+    `Home`, `End` and `Delete` aren't hinted: `home/end jump` would take 15
+    columns more, which pushes the composer (85), the comment box (81) and
+    the reply box (87) past 80, and the five boxes read alike this way.
   - A narrower terminal cuts every set on the
   right. `J/K scroll` comes last so that a Jobs footer narrower than 72
   columns shows what it did before the details could scroll: everything up
@@ -187,6 +210,47 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   cell was never sent: with a published post of wide text under the left
   edge, the border went missing in about 300 rows across sizes, first at
   134×13.
+- **Text boxes** (the composer, the comment box, the reply box, search and
+  the Send picker, and the top bar's search box while search is open) draw
+  a light blue `▏` at the cursor (`TextField::cursor`, see "App state"). It
+  goes between two characters, never over one, so it takes a column of its
+  own, the column each box always kept for it. An empty box shows the
+  cursor and its placeholder as it always did.
+  - **One-line boxes** (the top bar, search's input row, the Send filter,
+    the comment box and the reply box) show the part of the text that
+    `around_cursor` picks from the text, the cursor and the width, storing
+    nothing: the end of the text (`tail`) while that keeps at least a third
+    of the width before the cursor, or when the whole text fits; otherwise
+    the cursor sits a third of the way in (nearer the left edge close to the
+    start of the text, so with the cursor at the start the start shows), and
+    the text after it fills the rest. So with the cursor at the end, where
+    typing leaves it, every box shows exactly what it showed before the
+    cursor could move. Going left from the end the cursor walks to a third
+    of the way in, then the text scrolls under it; going right from the
+    start, the reverse. The window never moves against the cursor.
+  - **The composer** inserts the `▏` into the draft at the cursor and
+    splits the result into rows with `hard_wrap` (`wrap_with_cursor`, which
+    also finds the row holding the cursor). It shows the last rows that
+    still include the cursor's row: the end of the draft while the cursor is
+    in it, as before, otherwise the cursor's row at the top.
+  - **The cursor always shows.** Wherever a box is drawn with at least one
+    row and one column inside its border and padding, its `▏` is on
+    screen, however small the terminal. Everything else in the box gives
+    way first:
+    - search and the Send picker split their input row off first
+      (`input_first`), so when the overlay has room inside for only one row
+      (on a 9-row terminal), that row is the query or the filter, not the
+      rule or the post line;
+    - in a row too narrow for `⌕ ` (under 3 columns) or `To ` (under 4),
+      the label is cut (`head`) to leave the cursor its column;
+    - the composer drops its blank line, then its `Jordan Vale · Post to
+      Anyone` line, when its inside is too short for them and a draft row;
+    - an open thread splits its 3-row reply box off first (`thread_areas`),
+      so on a short thread the reply box stays whole and the name, rule and
+      messages give way.
+
+    At normal sizes (an overlay with 3 rows inside, a composer with 3, a
+    thread with 6) every box is laid out exactly as before.
 
 ### Home
 
@@ -255,10 +319,11 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     border (`post_detail_areas` splits the card's inside into the comments and
     a 3-row box). It is drawn like the Messaging reply box
     (`render_comment_box`): a dim `Press c to comment` until `c` focuses it,
-    then the draft followed by a `▏` cursor, or the dim placeholder
+    then the draft with a `▏` at the cursor, or the dim placeholder
     `Add a comment…` followed by the cursor when the draft is empty. A draft
-    too wide for the box shows its end (`tail`, by display width), so the
-    cursor and what you just typed stay in view. Its border is light blue
+    too wide for the box shows the part around the cursor (`around_cursor`,
+    by display width; see "Text boxes" above), so the cursor stays in view:
+    its end, and what you just typed, while you type at the end. Its border is light blue
     while it has focus. In a box too narrow for the whole placeholder, the
     placeholder is cut (`head`) so the cursor still shows.
   - **Scrolling:** the comments scroll in the rows above the box, never under
@@ -278,7 +343,8 @@ The screen is a header (3 rows), a body, and a footer (1 row).
 
   Captured from the real binary in a 120×30 tmux pane, after posting
   `Agreed: q1 caching / split shards is the way` on Maren Holt's post and
-  pressing `c` again to start another comment:
+  pressing `c` again to start another comment (re-captured after the cursor
+  could move, which only added `←/→ cursor` to the footer):
 
   ```
   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -310,21 +376,30 @@ The screen is a header (3 rows), a body, and a footer (1 row).
                           │ │ Happy to pair on the write-up▏                             │ │
                           │ ╰────────────────────────────────────────────────────────────╯ │
                           ╰────────────────────────────────────────────────────────────────╯
-   type write  backspace delete  enter post  esc cancel
+   type write  backspace delete  enter post  esc cancel  ←/→ cursor
   ```
+
+  Then `←` thirteen times moves only the cursor, and the box reads
+  `│ Happy to pair on▏ the write-up                             │`.
 - **Composer (p):** a "Create a post" box centered over the body. It shows
-  `Jordan Vale · Post to Anyone`, then the draft with a `▏` cursor, or the
-  placeholder "What do you want to talk about?". The draft is split into rows
-  by display width (`hard_wrap`) rather than word-wrapped, so every typed space
-  shows. A long draft keeps its end, where the cursor is, in view.
+  `Jordan Vale · Post to Anyone`, then the draft with a `▏` at the cursor,
+  or the cursor and the placeholder "What do you want to talk about?". The
+  draft is split into rows by display width (`hard_wrap`) rather than
+  word-wrapped, so every typed space shows. A draft taller than the box
+  shows the last rows that still hold the cursor's row (see "Text boxes"
+  above): its end while you type at the end. In a box too short for the
+  name line, a blank line and a draft row, the blank line goes, then the
+  name line, so the cursor stays on screen.
 - **Send picker (s):** `s` in the feed or the post view opens a "Send" box
   over the body for the selected post, sized and placed like the search
   overlay (`search_area`). From the top (`render_send`):
-  - **Filter row** (`send_input`): `To `, the filter and a `▏` cursor, or the
-    dim placeholder `Type a name` and the cursor when the filter is empty. A
-    filter too wide for the row shows its end (`tail`, by display width), so
-    the cursor stays visible. In a row too narrow for the placeholder, the
-    placeholder is cut (`head`).
+  - **Filter row** (`send_input`): `To ` and the filter with a `▏` at the
+    cursor, or the dim placeholder `Type a name` and the cursor when the
+    filter is empty. A filter too wide for the row shows the part around the
+    cursor (`around_cursor`, by display width), so the cursor stays visible. In a row too narrow for the placeholder, the
+    placeholder is cut (`head`), and in a row under 4 columns so is `To `.
+    The filter row is split off first (`input_first`), so when the box has
+    room inside for only one row, it is this one.
   - **Post row:** `author · ` and the first line of the body (`first_line`),
     cut with `…` to fit (`hit_line` with no query, so nothing is bold).
   - A rule.
@@ -341,7 +416,9 @@ The screen is a header (3 rows), a body, and a footer (1 row).
 
   Captured from the real binary in a 120×30 tmux pane, opened from the feed
   with Maren Holt's post selected, after typing `o` (re-captured after the
-  bold change, which plain text doesn't show; the text is unchanged):
+  bold change, which plain text doesn't show; the text is unchanged; and
+  again after the cursor could move, which only added `←/→ cursor` to the
+  footer):
 
   ```
   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -373,7 +450,7 @@ The screen is a header (3 rows), a body, and a footer (1 row).
                       │                                                                              │
                       ╰──────────────────────────────────────────────────────────────────────────────╯
                           ╰────────────────────────────────────────────────────────────────╯
-   type filter  ↑/↓ move  enter send  esc cancel
+   type filter  ↑/↓ move  enter send  esc cancel  ←/→ cursor
   ```
 
 ### My Network
@@ -430,10 +507,15 @@ A conversation list (34 columns, at most half the width) and the open thread.
   message, and a preview of it (`You: …` when it's yours).
 - **Thread:** blank until you open one ("Select a conversation and press enter
   to open it"). Then: name and headline, a rule, the messages (`Name · age`,
-  then the indented body, newest at the bottom), and a "Reply" box. The reply
+  then the indented body, newest at the bottom), and a 3-row "Reply" box
+  (`messaging_areas` and `thread_areas` lay these out; the reply box is
+  split off first, so on a thread under 6 rows inside it stays whole and the
+  rows above give way). The reply
   box shows "Press enter to reply" when the list has focus, and the draft with
-  a `▏` cursor when it has focus. A long reply shows as much of its end as
-  fits (`tail`, by display width), so the cursor never runs off the box.
+  a `▏` at the cursor (or the cursor and `Write a message…` when empty) when
+  it has focus. A long reply shows the part around the cursor
+  (`around_cursor`, by display width), so the cursor never runs off the box:
+  as much of its end as fits while you type at the end.
 - The thread on the right is the conversation you opened with Enter, not the
   one under the cursor. Moving the cursor doesn't open, and so doesn't mark
   read, anything.
@@ -458,7 +540,8 @@ does).
 `/` opens a "Search" box centered over the body (at most 80×24, and 4
 columns and 2 rows smaller than the body), over whatever tab and mode were
 showing. Captured from the real binary in a 120×30 tmux pane after typing
-`typo`:
+`typo` (re-captured after the cursor could move, which only added
+`←/→ cursor` to the footer):
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -490,16 +573,27 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
                     │                                                                              │
                     ╰──────────────────────────────────────────────────────────────────────────────╯
                         ╰────────────────────────────────────────────────────────────────╯
- type search  ↑/↓ move  enter open  esc close
+ type search  ↑/↓ move  enter open  esc close  ←/→ cursor
 ```
 
-- **Input row** (`search_input`): `⌕ `, the query and a `▏` cursor, and on
-  the right the result count, `5 results` or `1 result`. There is no count
-  for an empty query, and none next to `No results`. A query too wide for the
-  box shows its end (`tail`, by display width). The count goes first: it only
+With a query longer than the box and the cursor moved to its start with
+`Home`, both boxes show the start (same pane):
+
+```
+│ in    ⌕ ▏Unpopular opinion: the best meeting   1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+│ Software Engineer │ ⌕ ▏Unpopular opinion: the best meeting is the one that turns into a doc, and │ersus-spaces truce │
+```
+
+- **Input row** (`search_input`): `⌕ `, the query with a `▏` at the cursor,
+  and on the right the result count, `5 results` or `1 result`. There is no
+  count for an empty query, and none next to `No results`. A query too wide
+  for the box shows the part around the cursor (`around_cursor`, by display
+  width), its end while you type at the end. The count goes first: it only
   shows while the query keeps at least `QUERY_MIN_WIDTH` (10) columns, or all
   of a shorter one, so `⌕ bright▏  5 results` needs 20 columns and at 19 it
-  is just `⌕ bright▏`. Under the input row, a rule.
+  is just `⌕ bright▏`. In a row under 3 columns the icon is cut so the cursor
+  keeps its column. Under the input row, a rule. The input row is split off
+  first (`input_first`), so a box with room inside for one row shows it.
 - **Results:** the empty prompt `Type to search people, jobs, posts,
   comments and messages`, or `No results`, or the results grouped under
   `People`, `Jobs`, `Posts`, `Comments` and `Messages` headings, in that
@@ -550,7 +644,7 @@ showing. Captured from the real binary in a 120×30 tmux pane after typing
   and the list scrolls with `first_visible` (via `render_list`) to keep it in
   view. Headings are list items too, but never selected.
 - **Header:** when the header has room for its search box, the box shows the
-  end of the query and the cursor. `header_fit` doesn't look at search, so the
+  query around the cursor, by the same rule as the input row. `header_fit` doesn't look at search, so the
   header lays out the same with search open or closed.
 
 ### Profile
@@ -727,9 +821,9 @@ struct Role         { title, company, years }
 | `job_scroll` | lines of the Jobs details card scrolled off the top, never more than `job_scroll_max`. Back to 0 when `job_sel` changes, kept like a selection otherwise |
 | `job_scroll_max` | how far the selected job's details can scroll on the current screen, set by `fit_job_details` |
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
-| `draft`, `reply`, `comment_draft` | composer, reply box and comment box text |
-| `search: Option<Search>` | `Some { query, selected }` while search is open. `selected` indexes `App::search_hits` |
-| `send: Option<SendPicker>` | `Some { query, selected }` while the Send picker is open. `query` is the filter, `selected` indexes `App::send_recipients` |
+| `draft`, `reply`, `comment_draft` | composer, reply box and comment box: each a `TextField`, the text and its cursor |
+| `search: Option<Search>` | `Some { query, selected }` while search is open. `query` is a `TextField`, `selected` indexes `App::search_hits` |
+| `send: Option<SendPicker>` | `Some { query, selected }` while the Send picker is open. `query` is the filter, a `TextField`, and `selected` indexes `App::send_recipients` |
 | `profile_page: Option<ProfilePage>` | `Some { name, post }` while a profile is open over the current tab and mode. `name` is whose (a member's or yours), `post` indexes `App::activity(name)` |
 | `status: Option<&'static str>` | toast text. Every toast is a fixed string. Cleared on the next key press |
 | `should_quit` | checked by the event loop in `main.rs` |
@@ -799,15 +893,29 @@ struct Role         { title, company, years }
   thread, where replies and shared posts are appended. The rule lives here,
   next to the matching, so a row can't show a message that isn't the match.
   A query that is empty once trimmed matches nothing.
+- **One editor for every text box.** `TextField { text, cursor }` holds a
+  box's text and its cursor, a byte index into `text` that is always on a
+  `char` boundary, so no slice at it can panic. Its fields are private:
+  `text()`, `cursor()` and `is_empty()` read it, `clear()` empties it with
+  the cursor at 0, and `TextField::from(&str)` (used by tests) puts the
+  cursor at the end. `TextField::on_key` does all the editing for all five
+  boxes (see "Text boxes" in "Key bindings") and reports what happened as an
+  `Edit`: `Changed` when the text changed, `Unchanged` when it didn't (the
+  cursor may have moved, or the key did nothing), or the key it leaves to
+  the box's owner, `Enter`, `Esc`, `Up` or `Down`. `on_composer_key`,
+  `on_comment_key` and `on_reply_key` act on `Enter` and `Esc` and ignore
+  the rest. A step is one `char`, so `日` is one step and `Backspace` or
+  `Delete` removes it whole. (A `char` isn't always what you'd call a
+  character: an emoji with a skin tone, or a letter with a combining accent,
+  is two or more steps.)
 - **One filter box for search and the picker.** `Search` and `SendPicker`
-  are both `FilterBox { query, selected }`. `FilterBox::on_key(key, len)`
-  does the editing and moving for both: Ctrl- and Alt-modified keys do
-  nothing, a typed key is appended, `Backspace` deletes, and either change
-  that alters the query selects the first item again; `↑`/`↓` move,
-  stopping at 0 and `len - 1`; `Tab`, `BackTab` and every other key do
-  nothing. It hands `Enter` and `Esc` back as a `BoxKey`, and
-  `on_search_key` and `on_send_key` decide what they do (jump or send,
-  close).
+  are both `FilterBox { query, selected }`, with `query` a `TextField`.
+  `FilterBox::on_key(key, len)` hands the key to `TextField::on_key`, then:
+  `Changed` selects the first item again, while `Unchanged` (a cursor move,
+  or `Backspace` at the start or `Delete` at the end) keeps the selection;
+  `↑`/`↓` move, stopping at 0 and `len - 1`. It hands `Enter` and `Esc` back
+  as a `BoxKey`, and `on_search_key` and `on_send_key` decide what they do
+  (jump or send, close).
 - **Search sits on top of `mode`.** Opening it leaves `tab`, `mode` and every
   selection alone, so Esc (`search = None`) puts back exactly what was there,
   including the post view and its selected comment.
@@ -848,7 +956,8 @@ struct Role         { title, company, years }
 - **The comment box** is `Mode::CommentBox { comment }`, where `comment` is
   the comment selected in the post view when you pressed `c`. Esc goes back to
   `PostDetail { comment }`, so the same comment is selected again. `c` clears
-  `comment_draft`, so every visit starts empty, and Esc clears it too.
+  `comment_draft` (text and cursor), so every visit starts empty with the
+  cursor at 0, and Esc clears it too.
 - **Commenting** (`post_comment`) pushes a `Comment` onto the end of the
   selected post's `comments` (the newest goes last, as in the seed): your
   profile's name and headline, age 0, and the draft with surrounding
@@ -901,7 +1010,10 @@ struct Role         { title, company, years }
   `go_to_conversation(chat)` (Messaging, `chat_sel = chat`, then
   `open_conversation`) is what search's conversation jump and `m` use.
 - **Text boxes:** a key is typed when it is `KeyCode::Char` without Ctrl or
-  Alt. Shift is fine.
+  Alt. Shift is fine. Every place that empties a box (`Esc`, publishing,
+  posting a comment, sending a reply, `c`, `open_conversation`, and opening
+  search or the picker, which start from `FilterBox::default()`) leaves it
+  with empty text and the cursor at 0.
 
 ## Key bindings
 
@@ -968,19 +1080,42 @@ nothing on My Network, Jobs, Messaging and Notifications. On a repost card,
 `l`, `Enter`, `s` and, in its post view, `c` and `x` act on the original. `J` and
 `K` do nothing off Jobs, including in the post view. Opening Notifications by any route marks them all read.
 
+**Text boxes:** the composer, the comment box, the reply box, search and the
+Send picker edit their text the same way (`TextField::on_key`):
+
+| Key | Action |
+|---|---|
+| a printable key | typed at the cursor, which moves past it. Shift is fine |
+| `←` / `→` | move the cursor one character, stopping at both ends. A character is a `char`, so `日` is one step and never split |
+| `Home` / `End` | move the cursor to the start / end |
+| `Backspace` | delete the character before the cursor. Nothing at the start |
+| `Delete` | delete the character under the cursor. Nothing at the end |
+
+Every Ctrl- or Alt-modified key does nothing in a text box, the arrows,
+`Home`, `End`, `Delete`, `Backspace`, `Enter` and `Esc` included, and
+Ctrl-C still quits. (Before the boxes shared `TextField`, the composer and
+the reply box let a modified `Enter`, `Esc` or `Backspace` through; now they
+are like the other three.) `Tab` and `BackTab` do nothing. Every box opens
+empty with the cursor at 0, and is that again whenever it is emptied.
+Outside the text boxes `←`, `→`, `Home`, `End` and `Delete` do nothing, as
+before.
+
 **Composer:** every printable key, including `q`, `j`, `k`, `J`, `K`, `l`,
-`1`-`5`, `a`, `x`, `c`, `s`, `e`, `r`, `v` and `m`, is typed. `Backspace` deletes. `Enter` publishes
+`1`-`5`, `a`, `x`, `c`, `s`, `e`, `r`, `v` and `m`, is typed, and the text
+edits as above. `Enter` publishes the draft as edited
 and toasts "Post published", or toasts "Write something first" and stays open
-when the draft is empty or only whitespace. `Esc` discards the draft. `Tab`
-does nothing.
+when the draft is empty or only whitespace. `Esc` discards the draft. `↑`,
+`↓`, `Tab` and `BackTab` do nothing.
 
 **Search:** a text box like the composer. Every printable key without Ctrl
 or Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `p`, `a`, `x`, `c`,
 `s`, `e`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
-scroll). `Backspace` deletes, and does nothing
-on an empty query (search stays open). `↓`/`↑` move through the results,
-stopping at both ends. Any change to the query selects the first result
-again. `Enter` closes search and goes to the selected result, switching tabs
+scroll). The query edits as in "Text boxes" above; `Backspace` at the
+start, on an empty query too, does nothing (search stays open). `↓`/`↑`
+move through the results, stopping at both ends. Any change to the query
+selects the first result again; only a real change counts, so moving the
+cursor, `Backspace` at the start and `Delete` at the end keep the selected
+result. `Enter` closes search and goes to the selected result, switching tabs
 the way `1`-`5` do (so leaving Notifications ends the visit):
 
 | Result | Lands on |
@@ -994,36 +1129,41 @@ the way `1`-`5` do (so leaving Notifications ends the visit):
 
 `Enter` with no results, or an empty query, toasts "No results" and keeps
 search open with the query. `Esc` closes it and discards the query. `Tab`,
-`BackTab` and every Ctrl- or Alt-modified key do nothing (Ctrl-C still
-quits).
+`BackTab` and every Ctrl- or Alt-modified key, the arrows included, do
+nothing (Ctrl-C still quits).
 
 **Comment box:** a text box like search. Every printable key without Ctrl or
 Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `r`,
 `v`, `m`, `/` and `1`-`5`, and does nothing else (no quit, comment move, like, delete,
-repost, composer, search or tab switch). `Backspace` deletes, and does nothing on an empty draft (the box
-keeps focus). `Enter` posts the comment, selects it and toasts "Comment
+repost, composer, search or tab switch). The draft edits as in "Text boxes"
+above, and `←`/`→` move the cursor, not the selected comment; `Backspace` at
+the start, on an empty draft too, does nothing (the box keeps focus).
+`Enter` posts the comment as edited, selects it and toasts "Comment
 posted", or toasts "Write something first" and keeps the box focused, with
 the draft as it was, when the draft is empty or only whitespace. `Esc`
 discards the draft and returns to the post view with the same comment
-selected. `Tab`, `BackTab`, the arrows and every Ctrl- or Alt-modified key do
+selected. `Tab`, `BackTab`, `↑`/`↓` and every Ctrl- or Alt-modified key do
 nothing (Ctrl-C still quits).
 
 **Send picker:** a text box like search. Every printable key without Ctrl
 or Alt is typed into the filter, including `q`, `j`, `k`, `J`, `K`, `l`, `c`,
 `x`, `p`, `s`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (no
-quit, tab switch, move, like, comment box, delete, repost, composer or search). `Backspace` deletes, and does
-nothing on an empty filter (the picker stays open). `↓`/`↑` move through the
-recipients, stopping at both ends, and any change to the filter selects the
-first recipient again. `Enter` sends the post to the selected recipient,
+quit, tab switch, move, like, comment box, delete, repost, composer or search). The filter edits as in
+"Text boxes" above; `Backspace` at the start, on an empty filter too, does
+nothing (the picker stays open). `↓`/`↑` move through the recipients,
+stopping at both ends, and any change to the filter selects the first
+recipient again, while moving the cursor, `Backspace` at the start and
+`Delete` at the end keep it. `Enter` sends the post to the selected recipient,
 closes the picker and toasts "Post sent", or, with no matches, toasts "No
 matches" and keeps the picker open with the filter as typed. `Esc` closes it
-and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key
-do nothing (Ctrl-C still quits).
+and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key,
+the arrows included, do nothing (Ctrl-C still quits).
 
-**Reply box:** printable keys, `J`, `K`, `r`, `v` and `m` included, are typed the same way. `Enter` appends the
-reply to the thread as yours, clears the box and keeps focus. An empty or
-whitespace-only reply does nothing. `Esc` discards the text and returns focus
-to the list.
+**Reply box:** printable keys, `J`, `K`, `r`, `v` and `m` included, are typed the same way, and the
+reply edits as in "Text boxes" above. `Enter` appends the reply as edited
+(trimmed) to the thread as yours, clears the box and keeps focus. An empty
+or whitespace-only reply does nothing. `Esc` discards the text and returns
+focus to the list. `↑`, `↓`, `Tab` and `BackTab` do nothing.
 
 ## Files
 
@@ -1085,9 +1225,9 @@ normal screen. The injected panic was then removed.
 
 ## Testing
 
-173 unit tests, run with `cargo test` (about 20 s):
+189 unit tests, run with `cargo test` (about 25 s):
 
-- **`app.rs`** (89), on the seed data:
+- **`app.rs`** (97), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -1137,10 +1277,11 @@ normal screen. The injected panic was then removed.
     with the third comment remembered. Esc discards the draft and selects the
     third comment again, and reopening starts empty.
   - Comment box typing: `q1jklcp/ 5` is typed, with no quit, tab switch,
-    comment move, like, composer or search. Shift is fine. `Tab`, `BackTab`,
-    the four arrows and Ctrl/Alt keys (including Ctrl-Enter, Alt-Backspace and
-    Ctrl-Esc) change nothing. Backspace on an empty draft keeps focus. Ctrl-C
-    quits.
+    comment move, like, composer or search. Shift is fine. `←` and `→` move
+    the cursor and nothing else (the same comment stays selected). `Tab`,
+    `BackTab`, `↑`, `↓` and Ctrl/Alt keys (including Ctrl-Enter,
+    Alt-Backspace, Ctrl-Esc, Ctrl-`←` and Alt-`Home`) change nothing.
+    Backspace on an empty draft keeps focus. Ctrl-C quits.
   - Posting on Maren Holt's post: a fourth comment, last, by Jordan Vale with
     your headline, age 0 and the trimmed body (inner double space kept),
     selected, with "Comment posted". Reactions, like state, `post_sel`, the
@@ -1348,20 +1489,59 @@ normal screen. The injected panic was then removed.
       About of more than one sentence. Invitations' and suggestions'
       `mutual` match their member's and they are `2nd`; post authors and
       conversation partners are `1st`.
-- **`ui.rs`** (84), rendering into a `TestBackend`:
+  - Text boxes:
+    - `TextField` on its own: typing after `←` inserts before the last
+      character with the cursor past it, `Home` then typing inserts at the
+      start, `Backspace` and `Delete` in the middle each remove one
+      character, and `Backspace`/`←` at the start and `Delete`/`→` at the
+      end change nothing and report `Unchanged`. `Enter`, `Esc`, `↑` and
+      `↓` come back to the owner; `Tab` and `BackTab` do nothing. With Ctrl
+      or Alt, the arrows, `Home`, `End`, `Delete`, `Backspace`, a letter,
+      `Enter`, `Esc` and `↑` do nothing. Shift-`X` is typed.
+    - `日` is one step each way and deleted whole by `Delete` and by
+      `Backspace`. From every cursor position in a text of 1- to 4-byte
+      characters, every editing key leaves the cursor on a `char` boundary
+      without panicking.
+    - In each of the five boxes, through `App::on_key`: `←` then typing
+      inserts in the middle, `Home` then typing at the start, `End` goes
+      back, `Backspace` and `Delete` in the middle, `Backspace` and `←` at
+      the start and `Delete` and `→` at the end changing nothing, `日`
+      stepped over in one move and deleted whole, and Ctrl/Alt-modified
+      arrows, `Home`, `End`, `Delete` and `Backspace`, `Tab` and `BackTab`
+      changing nothing. The tab, mode and every selection stay put, with
+      no toast. In the composer, comment box and reply box `↑`/`↓` change
+      nothing.
+    - Edited in the middle, then submitted: the composer publishes
+      `Hello world` (typed `Helo world`), the comment box posts
+      `Great post`, the reply box sends `See you there`, search opens
+      exactly where typing `lisbon` straight would (typed `lisbn`, `←`,
+      `o`), and the Send picker sends to Felix Abernathy (typed `flix`).
+    - Search (`bright`) and the picker (`o`): with the third result
+      selected, `←`, `→`, `Home`, `Backspace` at the start, `End`, `Delete`
+      at the end and `→` keep it; typing in the middle, `Delete` at the
+      start and a `Backspace` that deletes select the first again.
+    - Every box is empty with the cursor at 0 when it opens, after `Esc`,
+      after publishing, posting or sending, after `Enter` on a
+      conversation over a stale reply, and after a search jump to one.
+    - `←`, `→`, `Home`, `End` and `Delete` change nothing (`world`, the
+      profile, the overlays, the toast) on Home, in the post view, on My
+      Network, Jobs, Messaging (list and with a thread open),
+      Notifications and on a member's profile and yours.
+- **`ui.rs`** (92), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
-    `truncate` and `first_visible`, plus `width_of`, `head` and `tail`. The
+    `truncate` and `first_visible`, plus `width_of`, `head` and `tail`
+    (`around_cursor` and `wrap_with_cursor` under "Cursor rendering"). The
     text helpers are also checked on double-width text.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 33 states:
+  - Every size from 1×1 to 140×40 renders without panicking, for 34 states:
     Home, Home with two reposts around a published post (Maren Holt's
     repost selected), post view, the post view of a repost, comment box (empty and with text), post view after
     commenting, composer (empty and with text), My Network (invitation and
     suggestion selected), Jobs (with and without a toast, scrolled two lines,
     and scrolled past the end so it draws as the bottom at every size), Messaging, reply
-    box, Notifications, search (with matches, empty, no match, and over
+    box (with text and empty), Notifications, search (with matches, empty, no match, and over
     the post view), the Send picker (from the feed, and with `o` over the
     post view), and profiles: Maren Holt's from the feed, Tobias
     Ferreira-Lund's from the post view, an invitation's, an accepted
@@ -1442,9 +1622,10 @@ normal screen. The injected panic was then removed.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
   - Every state's hint set is at most 80 columns, and is what the footer
-    shows at 80×24. `every_state` holds 19 different sets: the 11 base
-    footers (the post view with someone else's comment selected), the post
-    view with your comment, and 7 profile footers. The post view footer reads exactly
+    shows at 80×24. `every_state` holds 24 different sets: the 11 base
+    footers (the post view with someone else's comment selected, and each
+    text box empty), the post view with your comment, 7 profile footers, and
+    the 5 text boxes holding text, which add `←/→ cursor`. The post view footer reads exactly
     `j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit`
     (80 columns with the padding) and the
     comment box's `type write  backspace delete  enter post  esc cancel`.
@@ -1631,6 +1812,49 @@ normal screen. The injected panic was then removed.
     On Lucia Brandt's post, no `j/k comments` with no comments or only your
     one, and `x delete` for yours, in the original's post view and in the
     post view of its repost.
+  - Cursor rendering:
+    - `around_cursor` is exactly `tail` with the cursor at the end and
+      `head` from the start with it at the start, at every width, for ASCII
+      and wide text; it shows a text that fits whole; it keeps the end while
+      a third of the width is before the cursor and otherwise puts the
+      cursor a third in; it never splits `日`. For every cursor and width up
+      to 30 the two parts meet at the cursor, fit the width, and the
+      window's start never moves against the cursor.
+    - `wrap_with_cursor` puts the `▏` on the right row, at the start, the
+      middle and the end, and next to `日`.
+    - At 120×30, `Nice one` with the cursor four steps left shows
+      `Nice▏ one` in the comment box, the reply box and the composer,
+      `To Nice▏ one` in the picker, `⌕ Nice▏ one` in search and in the top
+      bar. In the comment box the cells read exactly `Nice▏ one`, only the
+      `▏` light blue.
+    - `Start ` and four times the wide text, at 120×30, 80×24 and 60×20, in
+      the five boxes: after `Home` the row starts with the `▏`, then
+      `Start a日`; after `Home` then `End` the screen is identical to the
+      one before `Home`, and in the one-line boxes it shows the end of the
+      text. The top bar shows `⌕ ▏Start a日` after `Home`.
+    - A composer draft four rows and more taller than the box: with the
+      cursor at the start the first rows show, exactly; with it on a middle
+      row that row is at the top; at the end, as before, the last row ends
+      in the `▏`.
+    - The five boxes empty, and with 3,000 characters of `日本語 text` and
+      the cursor at the start, in the middle, at the end, just after a `日`
+      and just before one, at every size from 1×1 to 140×40: every row of
+      the box starts and ends with its border and is exactly the box's
+      width, by display width, and wherever the box has at least one row
+      and one column inside its border and padding, the `▏` is inside it
+      exactly once. With search open, the top bar's search box holds it
+      exactly once whenever it shows.
+    - Short boxes: `thread_areas` gives the reply box `min(height, 3)` rows
+      at the bottom at every height from 0 to 40, the rows above taking the
+      rest. On a 9-row screen the overlays have one row inside, and it is
+      the input row: `To ▏` at 12 columns, `To f▏e` for the picker and
+      `⌕ t▏y` for search at 30. `search_input` at 2 and 1 columns reads `⌕▏`
+      and `▏`, `send_input` at 3 reads `To▏`, and empty at 1, `▏`. The
+      composer at 40 columns shows `Jordan Vale`, a blank line and `draft▏`
+      on a 9-row screen, then drops the blank line at 8 and the name at 7.
+    - Each text box's footer at 80×24 reads exactly its old set while empty
+      and that set plus `←/→ cursor` with text; the hints are single width;
+      `←` changes the screen there, and `→` changes it back.
   - Every key a footer names does something, and the ones a profile footer
     leaves out do nothing (`every_key_a_footer_names_does_something`). For
     14 states (profiles of every kind with 0, 1, 2 or 3 posts, and post
@@ -1813,6 +2037,46 @@ beside `r repost` instead of in its place (90 columns), fails
 `every_key_a_footer_names_does_something`. Making `is_yours` true for any
 post holding a comment of yours fails
 `the_post_view_footer_names_x_delete_only_for_your_comment`.
+
+For the movable cursor, each break was caught and then restored. Selecting
+the first result on every key, moves included, fails
+`only_a_real_change_to_the_query_selects_the_first_result_again`. Always
+showing the end of a one-line box (`tail`) whatever the cursor fails
+`around_cursor_shows_the_end_the_start_or_the_cursor_a_third_in` and
+`a_long_text_shows_its_start_with_the_cursor_there_and_its_end_as_before`.
+Always showing the end of the composer's draft fails
+`a_composer_draft_taller_than_the_box_shows_the_cursors_row` and
+`every_box_keeps_its_cursor_inside_its_border_at_every_size`. Not putting
+the cursor back to 0 in `TextField::clear` fails 18, including
+`every_box_opens_empty_with_the_cursor_at_0` (and panics elsewhere once the
+next character goes in past the end). Showing `←/→ cursor` in an empty box
+fails 4, including
+`text_box_footers_name_the_cursor_keys_once_there_is_text` and
+`every_hint_set_fits_80_columns`. Drawing the `▏` over the next character
+fails `the_cursor_shows_in_the_middle_of_every_box` and the long-text test.
+Making `Backspace` delete the last character instead of the one before
+the cursor fails 4, and stepping `←` one byte instead of one `char` fails
+`a_double_width_character_is_one_step` and
+`every_text_box_moves_the_cursor_and_edits_in_the_middle`. Letting
+Ctrl/Alt-modified keys through except Ctrl with a letter fails 5,
+including the three "types keys instead of acting on them" tests.
+
+For the cursor always showing, each fix was undone and caught, then
+restored. Going back to the Send picker's single four-row `Layout` (which
+gave a lone inside row to the post line, first at 9×9), keeping the
+whole `⌕ ` in a row under 3 columns (first at 9×9), and always keeping the
+composer's name and blank line (first at 9×7) each fail
+`every_box_keeps_its_cursor_inside_its_border_at_every_size` and
+`short_boxes_keep_their_input_row`. Going back to `thread_areas`' single
+four-row `Layout`, which squeezes the reply box to 1 or 2 rows on a thread
+with 3 or 4 rows inside, fails `short_boxes_keep_their_input_row` (the
+every-size sweep can't see this one, since a reply box squeezed below 3
+rows has no row inside).
+
+After the movable cursor, the binary was run in a 120×30 private tmux
+session (`tmux -L wcursor`): the comment, Send picker and search captures
+above came out as before but for the footer, and `←` and `Home` moved the
+`▏` as captured.
 
 ## Ideas
 
