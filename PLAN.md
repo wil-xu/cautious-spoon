@@ -16,8 +16,9 @@ disagree, fix whichever one is wrong. Don't let them drift apart.
 - It responds the way LinkedIn does: liking posts, opening a post with its
   comments, commenting on it and deleting your own comments, sending a post
   to a conversation, reposting it to the top of your feed, writing a post, accepting or ignoring invitations,
-  sending connection requests, saving jobs and applying, reading and replying
-  to messages, and clearing notifications. `/` searches people, jobs, posts,
+  sending connection requests, saving jobs and applying, narrowing the jobs
+  to Remote, Hybrid, On-site or saved ones with a row of filter pills,
+  reading and replying to messages, and clearing notifications. `/` searches people, jobs, posts,
   comments and messages and jumps to the result. `v` opens the profile of
   the person under the selection: who they are, what they've done and what
   they've posted, in one place. Every text box (the composer, the comment
@@ -146,11 +147,12 @@ The screen is a header (3 rows), a body, and a footer (1 row).
 - **Footer:** key hints for the current tab and mode. A toast replaces them
   (white on blue) until the next key press. Every hint set fits on one line at
   80 columns. **A hint names only a key that does something right now.**
-  Most sets are fixed: Home, My Network, Jobs, Messaging list and
-  Notifications. The post view's (`post_view_hints`), a profile's
-  (`profile_hints`, below) and the five text boxes' (`text_box_hints`) are
-  built from the current state. Jobs reads
-  `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
+  Most sets are fixed: Home, My Network, Messaging list and
+  Notifications. Jobs' (`jobs_hints`, below), the post view's
+  (`post_view_hints`), a profile's (`profile_hints`, below) and the five
+  text boxes' (`text_box_hints`) are built from the current state. Jobs,
+  with details too long for the card, reads
+  `j/k move  s save  e easy apply  f filter  1-5 tabs  q quit  J/K scroll`
   (72 columns with the padding). Home reads
   `j/k move  l like  enter open  p post  r repost  s send  v profile  q quit`
   (75), the post view
@@ -162,6 +164,24 @@ The screen is a header (3 rows), a body, and a footer (1 row).
   view `1-5 tabs`. To make room for `v profile` (11 columns), Home dropped
   `1-5 tabs` too (74 + 11 would be 85). Both keys still work there. My
   Network had exactly 11 columns to spare, so it gives nothing up.
+  - **The Jobs footer** follows the filtered list. To make room for
+    `f filter` (10 columns; with it the old set would be 82), Jobs dropped
+    `tab next`, as Home did first. `Tab` still works, `1-5 tabs` names the
+    numbers the header shows, and every other tab's footer still says
+    `tab next`. Dropping `q quit` or cutting `e easy apply` short would have
+    saved too little, and `J/K scroll` is the only cue that the details
+    scroll. `f filter` goes right after `e easy apply`, so `J/K scroll`
+    stays last. `j/k move` shows only with two shown jobs or more, as
+    `j/k comments` needs two comments. `J/K scroll` shows only when the
+    selected job's details overflow the card on the current screen
+    (`job_scroll_max > 0`, which the event loop sets before every frame), so
+    it is there whenever `J` or `K` would move the text and never otherwise.
+    At 80×24 every seed job fits, so the seed reads
+    `j/k move  s save  e easy apply  f filter  1-5 tabs  q quit` there, its
+    `Saved` list `s save  e easy apply  f filter  1-5 tabs  q quit`, and at
+    80×20 each gets `J/K scroll` back. An empty list, where `s`, `e`, `j`,
+    `k`, `J` and `K` do nothing, reads `f filter  1-5 tabs  q quit`. (Before
+    the filters, `J/K scroll` showed even where everything fit.)
   - **The post view's footer** follows the selected comment and the post:
     - `x delete` shows exactly when the selected comment is yours
       (`App::is_yours`, the same check `x` makes before deleting), so the
@@ -198,8 +218,8 @@ The screen is a header (3 rows), a body, and a footer (1 row).
     the reply box (87) past 80, and the five boxes read alike this way.
   - A narrower terminal cuts every set on the
   right. `J/K scroll` comes last so that a Jobs footer narrower than 72
-  columns shows what it did before the details could scroll: everything up
-  to `q quit` from 60 columns, cut in the same place below that.
+  columns shows the set without it: everything up to `q quit` from 60
+  columns, cut in the same place below that.
 - **Selection:** the selected list row has a blue `▌` bar and a highlighted
   background. The selected feed card and the focused box have a light blue
   border. Lists scroll only once the selection would fall off the bottom.
@@ -469,8 +489,74 @@ The screen is a header (3 rows), a body, and a footer (1 row).
 
 ### Jobs
 
-A "Jobs for you" list (40%) and "Job details" (60%).
+A "Jobs for you" list (40%) and "Job details" (60%). Captured from the real
+binary in a 120×30 tmux pane after `3` and `f`:
 
+```
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ in    ⌕ Search                                 1 Home  2 My Network (3)  3 Jobs  4 Messaging (2)  5 Notifications (3)│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Jobs for you · Remote (2) ───────────────────╮╭ Job details ─────────────────────────────────────────────────────────╮
+│  All  Remote  Hybrid  On-site  Saved         ││ Senior Rust Engineer                                                 │
+│ ▌Senior Rust Engineer ★                      ││ Quillfeather Systems                                                 │
+│ ▌Quillfeather Systems                        ││ Lisbon, Portugal · Remote                                            │
+│ ▌Lisbon, Portugal · Remote                   ││ Posted 1d ago · 48 applicants                                        │
+│  Developer Advocate                          ││                                                                      │
+│  Brightkettle                                ││  Easy Apply    ★ Saved                                               │
+│  Anywhere in Europe · Remote                 ││                                                                      │
+│                                              ││ About the job                                                        │
+│                                              ││ Join the platform team building the services behind Quillfeather's   │
+│                                              ││ document editor. You'll own a Rust storage layer, review designs,    │
+│                                              ││ and mentor two junior engineers.                                     │
+│                                              ││                                                                      │
+│                                              ││ You have shipped Rust in production, enjoy writing tests, and can    │
+│                                              ││ explain a tricky bug to a non-engineer.                              │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+│                                              ││                                                                      │
+╰──────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────╯
+ j/k move  s save  e easy apply  f filter  1-5 tabs  q quit
+```
+
+(`Remote` is bold, light blue and underlined on the real screen.)
+
+- **Filters:** one at a time, `All` (the default), `Remote`, `Hybrid`,
+  `On-site` or `Saved` (`JobFilter`). `f` steps to the next, wrapping from
+  `Saved` to `All`. The list shows the jobs that match, in seed order
+  (`App::shown_jobs`): by `workplace`, or for `Saved` by `saved` as it is
+  now. In the seed each workplace has two jobs and `Saved` one.
+- **Filter row** (`filter_row`): the first row inside the list card,
+  `All  Remote  Hybrid  On-site  Saved`, starting after the selection bar's
+  column like a list row. The active pill is bold, light blue and
+  underlined, the others dim. The job rows start below it
+  (`jobs_list_areas`), and selection, scrolling and the `▌` bar work as
+  before in the rows left.
+  - **Narrow cards:** the whole row needs 36 columns inside the card's
+    padding (a 40-column card, from a 99-column terminal). On a narrower
+    card the row shows the run of whole pills that holds the active one and
+    starts as early as possible, with a dim `…` on each side that leaves
+    pills out. At 80 columns that is `All  Remote  Hybrid …` for the first
+    three, `… Remote  Hybrid  On-site …` and `… Hybrid  On-site  Saved`.
+    When not even the active pill fits with a `…`, it shows alone, then
+    without the bar's column, so its label is whole whenever the inside of
+    the card is as wide as it; only a card narrower than its label cuts it
+    with `…`. Nothing runs past the border.
+- **Title** (`jobs_title`): ` Jobs for you ` with `All`, otherwise also the
+  filter and how many jobs it shows, ` Jobs for you · Remote (2) `. A card
+  too narrow for that (under 30 columns for `On-site`) drops `Jobs for you`,
+  ` Remote (2) `, and a card too narrow for that cuts it with `…`, so it
+  never runs into the corners.
+- **Empty list:** when nothing matches (the seed's `Saved` after unsaving
+  the Senior Rust Engineer), the list says `No saved jobs`, or `No jobs
+  match` for any other filter, no row is selected, and the details card
+  says `Select a job`, centered, with no indicators.
 - **List rows:** title in blue with `★` when saved, company, then
   `location · Remote/Hybrid/On-site`, plus a green `Applied` once applied.
 - **Details:** title, company, `location · workplace`, `Posted Nd ago · N
@@ -482,7 +568,8 @@ A "Jobs for you" list (40%) and "Job details" (60%).
   without moving the list. It stops at the top, and at the bottom once the
   last line of the description is on the card's last row, so it never shows
   blank rows below the end while lines above are hidden. When everything
-  fits it shows from the top and `J`/`K` change nothing visible.
+  fits it shows from the top, `J`/`K` change nothing visible and the footer
+  leaves `J/K scroll` out.
   - **Indicators:** while lines are hidden below, the bottom border ends in
     a light blue ` ↓ more ` just left of the `╯`. While lines are hidden
     above, the top border ends in ` ↑ more ` just left of the `╮`, with
@@ -493,11 +580,23 @@ A "Jobs for you" list (40%) and "Job details" (60%).
     card drops it rather than cutting it or the title. A card
     one row high has its top and bottom border on the same row and gets
     neither.
-  - **Reset:** the card goes back to the top whenever `j`/`k`/`↓`/`↑` move
-    to another job, and on every search jump to a job, even to the one
-    already selected. `j` on the last job and `k` on the first don't change
-    `job_sel`, so they keep it. Switching tabs and coming back, `/` then
-    Esc, and `s` and `e` keep it, like every other selection.
+  - **Reset:** the card goes back to the top whenever the selected job
+    changes: `j`/`k`/`↓`/`↑` to another job, `f` to a filter that hides the
+    selected job, and `s` that unsaves it out of the `Saved` list. It also
+    goes back on every search jump to a job, even to the one already
+    selected. `j` on the last shown job and `k` on the first, and `f` to a
+    filter that still shows the selected job, keep it. Switching tabs and
+    coming back, `/` then Esc, and `s` and `e` otherwise keep it, like every
+    other selection.
+- **Selection follows the job:** `f` keeps the selected job if the new
+  filter shows it, and otherwise selects its first job. `j`/`k` move through
+  the shown jobs only, stopping at both ends. `s` under `Saved` unsaves the
+  job ("Job unsaved") and it leaves the list at once; the selection keeps
+  its row, clamped to the list, as removing an invitation does on My
+  Network: the next job slides under the cursor, or the cursor moves up when
+  the last one goes. Saving or unsaving under any other filter changes no
+  list, so the selection stays. The profile card's `Saved jobs` follows as
+  always.
 
 ### Messaging
 
@@ -601,7 +700,8 @@ With a query longer than the box and the cursor moved to its start with
   - person: the name, then `headline · Invitation` (or `· Connect` /
     `· Pending` for a suggestion). The label always shows; the headline is cut
     with `…` to make room,
-  - job: the title, then `company · location · Remote/Hybrid/On-site`,
+  - job: the title, then `company · location · Remote/Hybrid/On-site`.
+    Search ignores the Jobs filter: every matching job is found,
   - post: `author · headline`, then the body on one line, newlines shown as
     spaces, cut with `…`. When that line would hide the body's first match
     (`body_line`), it shows an excerpt instead: `…`, a few words before the
@@ -817,8 +917,9 @@ struct Role         { title, company, years }
 | `feed: Vec<Card>` | the Home feed, top to bottom. A `Card { post: PostId, repost: bool }` is a post's own card or your repost of it. Every post has exactly one own card, in the order of `posts`, and reposts go in between |
 | `tab: Tab` | `Home`, `Network`, `Jobs`, `Messaging`, `Notifications` |
 | `mode: Mode` | `Browse`, `PostDetail { comment }`, `CommentBox { comment }`, `Composer`, `Reply` |
-| `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs. `post_sel` indexes `feed` |
-| `job_scroll` | lines of the Jobs details card scrolled off the top, never more than `job_scroll_max`. Back to 0 when `job_sel` changes, kept like a selection otherwise |
+| `post_sel`, `network_sel`, `job_sel`, `chat_sel`, `notif_sel` | one selection per list, kept while you visit other tabs. `post_sel` indexes `feed`. `job_sel` indexes `jobs`, not the filtered list |
+| `job_filter: JobFilter` | `All`, `Remote`, `Hybrid`, `OnSite` or `Saved`: which jobs the Jobs list shows. Not persisted, but kept like a selection |
+| `job_scroll` | lines of the Jobs details card scrolled off the top, never more than `job_scroll_max`. Back to 0 when the selected job changes, kept like a selection otherwise |
 | `job_scroll_max` | how far the selected job's details can scroll on the current screen, set by `fit_job_details` |
 | `open_chat: Option<usize>` | the thread shown in Messaging. `None` until you press Enter |
 | `draft`, `reply`, `comment_draft` | composer, reply box and comment box: each a `TextField`, the text and its cursor |
@@ -849,6 +950,24 @@ struct Role         { title, company, years }
   before the app has heard of a resize free of blank rows too. In the real
   loop the two agree.
 
+- **The Jobs filter selects jobs, not rows.** `job_sel` indexes `jobs`, so
+  the selection follows the job when the filter changes, and the shown list
+  (`App::shown_jobs`) is computed when asked, never stored. The selected job
+  is `App::selected_job()`: `job_sel` while `job_filter` shows it. Every key
+  that changes the filter or what it shows keeps that true or empties the
+  list: `f` (`set_job_filter`) keeps `job_sel` when the new filter shows it
+  and otherwise moves it to the first shown job; `s` under `Saved`
+  (`drop_unsaved_job`) moves it to the job that took its row, clamped; a
+  search jump to a job the filter hides sets the filter back to `All`.
+  Saving under another filter, applying and `J`/`K` change no list. With an
+  empty list `job_sel` stays where it was but `selected_job()` is `None`, so
+  nothing is selected: `s`, `e`, `j`, `k`, `J` and `K` do nothing, the next
+  `f` selects the first job of its filter, and `ui::job_scroll_max` is 0.
+  `job_scroll` goes back to 0 exactly when `selected_job()` changes
+  (`reset_job_scroll_if_moved`), which is when `job_sel` changed before
+  there were filters. Nothing outside the Jobs tab touches `job_filter` but
+  that search jump: `set_tab`, search, the Send picker and a profile leave
+  it alone.
 - **Derived counts:** badges (`App::badge`) and saved jobs
   (`App::saved_jobs`) are computed when asked, never stored. So is whether a
   post is reposted (`App::reposted(id)`: is there a repost card for it).
@@ -882,7 +1001,7 @@ struct Role         { title, company, years }
   name and headline; job title, company and location; post author, headline
   and body; comment body (not its author or headline); conversation name and
   every message body (not its headline). Notifications and news aren't
-  searched. The order is people (invitations, then suggestions), jobs, posts
+  searched. Jobs are searched whatever `job_filter` shows. The order is people (invitations, then suggestions), jobs, posts
   in feed order, comments (by post in feed order, then in post view order),
   then conversations in Messaging list order. A post and one of its comments
   are separate results: neither makes the other match. A conversation is one
@@ -1047,16 +1166,20 @@ Per tab:
 | My Network | `x` | ignore it: removed, connections unchanged, "Invitation ignored" |
 | My Network | `c` | on a suggestion, Connect ↔ Pending: "Invitation sent" / "Invitation withdrawn" |
 | My Network | `v` / `Enter` | open the selected invitation's or suggestion's profile |
-| Jobs | `s` | save / unsave: "Job saved" / "Job unsaved" |
+| Jobs | `s` | save / unsave: "Job saved" / "Job unsaved". Under `Saved`, an unsaved job leaves the list and the next one (or the new last) is selected |
 | Jobs | `e` | Easy Apply: "Application sent", then "Already applied" with no change |
 | Jobs | `J` / `K` | scroll the details down / up one line (Shift-j / Shift-k), stopping at the top and where the description ends on the last row |
+| Jobs | `f` | next filter: All → Remote → Hybrid → On-site → Saved → All. The selected job stays if the new filter shows it, otherwise its first job is selected. Also on an empty list |
 | Messaging | `Enter` | open the selected conversation, mark it read, focus the reply box |
 | Messaging | `v` | open the profile of the selected conversation's person (the one under the cursor, not the open thread), from the list |
 
-`v` does nothing on Jobs and Notifications, and on a profile.
+`v` does nothing on Jobs and Notifications, and on a profile. `f` does
+nothing on Home (feed and post view), My Network, Messaging, Notifications
+and a profile, not even a toast. On Jobs with an empty filtered list, `s`,
+`e`, `j`, `k`, `J` and `K` do nothing, not even a toast; `f` still works.
 
 **Profile:** keys go to the profile, never to the tab and mode under it, so
-`l`, `r`, `s`, `p`, `e`, `J`, `K` and `v` do nothing there.
+`l`, `r`, `s`, `p`, `e`, `f`, `J`, `K` and `v` do nothing there.
 
 | Key | Action |
 |---|---|
@@ -1101,7 +1224,7 @@ Outside the text boxes `←`, `→`, `Home`, `End` and `Delete` do nothing, as
 before.
 
 **Composer:** every printable key, including `q`, `j`, `k`, `J`, `K`, `l`,
-`1`-`5`, `a`, `x`, `c`, `s`, `e`, `r`, `v` and `m`, is typed, and the text
+`1`-`5`, `a`, `x`, `c`, `s`, `e`, `f`, `r`, `v` and `m`, is typed, and the text
 edits as above. `Enter` publishes the draft as edited
 and toasts "Post published", or toasts "Write something first" and stays open
 when the draft is empty or only whitespace. `Esc` discards the draft. `↑`,
@@ -1109,8 +1232,8 @@ when the draft is empty or only whitespace. `Esc` discards the draft. `↑`,
 
 **Search:** a text box like the composer. Every printable key without Ctrl
 or Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `p`, `a`, `x`, `c`,
-`s`, `e`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
-scroll). The query edits as in "Text boxes" above; `Backspace` at the
+`s`, `e`, `f`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (`J`/`K` on Jobs don't
+scroll, and `f` doesn't filter). The query edits as in "Text boxes" above; `Backspace` at the
 start, on an empty query too, does nothing (search stays open). `↓`/`↑`
 move through the results, stopping at both ends. Any change to the query
 selects the first result again; only a real change counts, so moving the
@@ -1122,7 +1245,7 @@ the way `1`-`5` do (so leaving Notifications ends the visit):
 |---|---|
 | invitation `i` | My Network, `network_sel = i` |
 | suggestion `i` | My Network, `network_sel = invitations + i` |
-| job `i` | Jobs, `job_sel = i` |
+| job `i` | Jobs, `job_sel = i`, the details at the top. If `job_filter` hides job `i`, it goes back to `All`; if it shows it, it stays |
 | post `i` | Home feed (not the post view), `post_sel` on post `i`'s own card (`i` itself until you repost) |
 | comment `c` of post `p` | Home, `post_sel` on post `p`'s own card, the post view with `PostDetail { comment: c }`: the comment is selected and scrolled into view, and `j`/`k` carry on from it. Esc goes back to the feed on post `p` |
 | conversation `i` | Messaging, `chat_sel = i`, opened as `Enter` on it opens it: `open_chat = Some(i)`, marked read (the badge drops), reply draft cleared, reply box focused |
@@ -1133,7 +1256,7 @@ search open with the query. `Esc` closes it and discards the query. `Tab`,
 nothing (Ctrl-C still quits).
 
 **Comment box:** a text box like search. Every printable key without Ctrl or
-Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `r`,
+Alt is typed, including `q`, `j`, `k`, `J`, `K`, `l`, `c`, `x`, `p`, `f`, `r`,
 `v`, `m`, `/` and `1`-`5`, and does nothing else (no quit, comment move, like, delete,
 repost, composer, search or tab switch). The draft edits as in "Text boxes"
 above, and `←`/`→` move the cursor, not the selected comment; `Backspace` at
@@ -1147,7 +1270,7 @@ nothing (Ctrl-C still quits).
 
 **Send picker:** a text box like search. Every printable key without Ctrl
 or Alt is typed into the filter, including `q`, `j`, `k`, `J`, `K`, `l`, `c`,
-`x`, `p`, `s`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (no
+`x`, `p`, `s`, `f`, `r`, `v`, `m`, `/` and `1`-`5`, and does nothing else (no
 quit, tab switch, move, like, comment box, delete, repost, composer or search). The filter edits as in
 "Text boxes" above; `Backspace` at the start, on an empty filter too, does
 nothing (the picker stays open). `↓`/`↑` move through the recipients,
@@ -1159,7 +1282,7 @@ matches" and keeps the picker open with the filter as typed. `Esc` closes it
 and discards the filter. `Tab`, `BackTab` and every Ctrl- or Alt-modified key,
 the arrows included, do nothing (Ctrl-C still quits).
 
-**Reply box:** printable keys, `J`, `K`, `r`, `v` and `m` included, are typed the same way, and the
+**Reply box:** printable keys, `J`, `K`, `f`, `r`, `v` and `m` included, are typed the same way, and the
 reply edits as in "Text boxes" above. `Enter` appends the reply as edited
 (trimmed) to the thread as yours, clears the box and keeps focus. An empty
 or whitespace-only reply does nothing. `Esc` discards the text and returns
@@ -1225,9 +1348,9 @@ normal screen. The injected panic was then removed.
 
 ## Testing
 
-189 unit tests, run with `cargo test` (about 25 s):
+210 unit tests, run with `cargo test` (about 25 s):
 
-- **`app.rs`** (97), on the seed data:
+- **`app.rs`** (109), on the seed data:
   - Like adds 1 to reactions and a second press restores the count.
   - The post view opens on Enter, `j`/`k` walk its comments, and Esc returns
     to the same post. Switching tabs closes it.
@@ -1527,7 +1650,44 @@ normal screen. The injected panic was then removed.
       profile, the overlays, the toast) on Home, in the post view, on My
       Network, Jobs, Messaging (list and with a thread open),
       Notifications and on a member's profile and yours.
-- **`ui.rs`** (92), rendering into a `TestBackend`:
+  - Job filters:
+    - `f` steps All → Remote → Hybrid → On-site → Saved → All with no
+      toast, showing exactly the seed's six jobs, then Senior Rust Engineer
+      and Developer Advocate, Terminal UI Designer and Engineering Manager,
+      Site Reliability Engineer and Data Engineer, and the Senior Rust
+      Engineer alone.
+    - From Developer Advocate scrolled two lines: Remote keeps him and the
+      scroll; Hybrid, On-site and Saved each select their first job from
+      the top; All keeps the Senior Rust Engineer and his scroll.
+    - Under Hybrid, `k`/`↑` on the first job and `j`/`↓` on the last keep
+      the job and the scroll, and `j` goes from Terminal UI Designer
+      straight to Engineering Manager. With one job neither moves.
+    - The empty Saved list: no selected job, and `s`, `e`, `j`, `k`, `J`,
+      `K`, `↓`, `↑`, `Enter` and `v` change nothing (selections, jobs, the
+      scroll, the filter, the toast); `f` goes to All on the Senior Rust
+      Engineer. Leaving an empty list after unsaving the Data Engineer last
+      selects All's first job, not him.
+    - Unsaving under Saved, with three saved jobs, from the first row (the
+      next job selected, scroll 0), the middle row (the next) and the last
+      (the new last), each "Job unsaved", then down to none. The saved count
+      follows and All still lists six.
+    - `s` under All and Remote keeps the job, the scroll and the list;
+      Saved then keeps a job saved under Remote selected.
+    - Search jumps: under Hybrid to the Senior Rust Engineer (`lisbon`),
+      the filter goes back to All with him selected at the top; under Remote
+      to Developer Advocate (`brightkettle`) it stays Remote; from Home under
+      Saved, and from an empty Saved list, it goes back to All. `engineer`
+      finds the same four jobs under every filter.
+    - The filter and the selected job survive `1` then `3`, `Tab` then
+      `BackTab`, `/` then Esc, a profile closed with Esc and with `3`, `s`,
+      `s`, `e`, `e`, `J`, `K` and a search jump to a post.
+    - `f` changes nothing (`world`, the profile, the filter, no toast) on
+      Home, in the post view, on a profile from Home and from My Network, on
+      My Network, Messaging (list and after closing a thread) and
+      Notifications. It is typed in search on all five tabs, the composer,
+      the comment box, the Send picker from the feed and the post view, and
+      the reply box, and never filters.
+- **`ui.rs`** (101), rendering into a `TestBackend`:
   - The helpers `age`, `thousands`, `count`, `wrap`, `hard_wrap`,
     `truncate` and `first_visible`, plus `width_of`, `head` and `tail`
     (`around_cursor` and `wrap_with_cursor` under "Cursor rendering"). The
@@ -1535,7 +1695,7 @@ normal screen. The injected panic was then removed.
   - At 120×30, Home shows all three columns, in order. At 90×30 the sidebar
     is gone, and at 70×30 the profile card is too. The exact thresholds: the
     sidebar shows at 100 but not 99, and the card at 80 but not 79.
-  - Every size from 1×1 to 140×40 renders without panicking, for 34 states:
+  - Every size from 1×1 to 140×40 renders without panicking, for 37 states:
     Home, Home with two reposts around a published post (Maren Holt's
     repost selected), post view, the post view of a repost, comment box (empty and with text), post view after
     commenting, composer (empty and with text), My Network (invitation and
@@ -1546,8 +1706,9 @@ normal screen. The injected panic was then removed.
     post view), and profiles: Maren Holt's from the feed, Tobias
     Ferreira-Lund's from the post view, an invitation's, an accepted
     invitation's, a suggestion's (connect and pending), Ines Okonkwo's from
-    Messaging, yours with two posts, and search over a profile. One thread
-    per state.
+    Messaging, yours with two posts, and search over a profile, and Jobs
+    filtered to Remote, to Saved (one job) and to an empty Saved list. One
+    thread per state.
   - Card counts and `Like` → `Liked`. A published post renders first with
     `now`. The post view shows the full body and comments.
   - Reposts at 120×30: after `r` on Maren Holt's post the first card is
@@ -1603,29 +1764,34 @@ normal screen. The injected panic was then removed.
     ` ↓ more ` back. One `J` at 60×20 shows both. At 120×30 no job shows
     either and `J` leaves the screen identical. Scrolled to the bottom at
     60×20, the next frame at 120×30 equals the unscrolled one, before and
-    after `fit_job_details`; at 60×23 the end stays on the last row and the
-    first `K` moves the rows down one.
+    after `fit_job_details` (before it, all but the footer, which still
+    reads `J/K scroll` for the screen the app was last fitted to; the event
+    loop never draws that frame); at 60×23 the end stays on the last row and
+    the first `K` moves the rows down one.
   - The details card at the top, scrolled two lines and past the end, at
     every size from 1×1 to 140×40: the corners are always `╭╮╰╯`, ` ↑ more `
     shows exactly when lines are hidden above and it fits beside the whole
     title, ` ↓ more ` exactly when lines are hidden below and it fits, a
     one-row card shows neither, and at the bottom the last row inside is
     never blank.
-  - The Jobs footer reads exactly
-    `j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll`
-    at 80×24. At every narrower width it is that line cut on the right, and
-    it starts with exactly what the footer without `J/K scroll` showed at
-    that width.
+  - The Jobs footer, fitted to 80×20 where the Senior Rust Engineer's
+    details overflow, reads exactly
+    `j/k move  s save  e easy apply  f filter  1-5 tabs  q quit  J/K scroll`.
+    At every narrower width it is that line cut on the right, and it starts
+    with exactly what the footer without `J/K scroll` showed at that width.
+    Fitted to 80×24, where they fit, it has no `J/K scroll`.
     No other tab's footer has `J/K`. Home, My Network, Messaging and
     Notifications render the same at 120×30, 80×20 and 60×20 with the Jobs
     details scrolled as without.
   - My Network, Jobs and Messaging contents, including `◷ Pending`,
     `✔ Applied`, unread markers and the reply box.
   - Every state's hint set is at most 80 columns, and is what the footer
-    shows at 80×24. `every_state` holds 24 different sets: the 11 base
+    shows at 80×24. `every_state` holds 27 different sets: the 11 base
     footers (the post view with someone else's comment selected, and each
-    text box empty), the post view with your comment, 7 profile footers, and
-    the 5 text boxes holding text, which add `←/→ cursor`. The post view footer reads exactly
+    text box empty, and Jobs fitted to 60×20, with `J/K scroll`), the post
+    view with your comment, 7 profile footers, the 5 text boxes holding
+    text, which add `←/→ cursor`, and the Jobs footers with nothing fitted
+    (no `J/K scroll`), for one shown job and for an empty list. The post view footer reads exactly
     `j/k comments  l like  c comment  r repost  s send  v profile  esc back  q quit`
     (80 columns with the padding) and the
     comment box's `type write  backspace delete  enter post  esc cancel`.
@@ -1857,12 +2023,54 @@ normal screen. The injected panic was then removed.
       `←` changes the screen there, and `→` changes it back.
   - Every key a footer names does something, and the ones a profile footer
     leaves out do nothing (`every_key_a_footer_names_does_something`). For
-    14 states (profiles of every kind with 0, 1, 2 or 3 posts, and post
-    views with and without your comment and with no comments), each hinted
-    key (for `j/k`, `j` or `k`; for `1-5`, one of the digits) changes the
-    120×30 screen or quits. Each of `j`, `k`, `Enter`, `a`, `x`, `c` and `m`
-    whose hint is absent from a profile footer changes nothing, and neither
-    do `j`, `k` and `x` when the post view leaves them out.
+    15 states (profiles of every kind with 0, 1, 2 or 3 posts, post views
+    with and without your comment and with no comments, and Jobs with an
+    empty Saved list), each hinted key (for `j/k`, `j` or `k`; for `1-5`,
+    one of the digits) changes the 120×30 screen or quits. Each of `j`,
+    `k`, `Enter`, `a`, `x`, `c` and `m` whose hint is absent from a profile
+    footer changes nothing, neither do `j`, `k` and `x` when the post view
+    leaves them out, nor `j`, `k`, `s`, `e`, `J` and `K` on the empty Jobs
+    list.
+  - Job filters:
+    - The filter row at 120×30 reads `All  Remote  Hybrid  On-site  Saved`
+      for every filter, and at 80×24 `All  Remote  Hybrid …` (All, Remote,
+      Hybrid), `… Remote  Hybrid  On-site …` and `… Hybrid  On-site
+      Saved`. At both sizes exactly the active pill's cells are underlined,
+      bold and light blue, and every other letter and `…` on the row is dim.
+    - Each filter lists exactly its jobs at 120×40, in seed order, three
+      rows each from the row under the pills, the first with the `▌` bar.
+    - The title at 120×30 and 80×24 is ` Jobs for you ` for All and
+      ` Jobs for you · Remote (2) `, `Hybrid (2)`, `On-site (2)`,
+      `Saved (1)` and, empty, `Saved (0)`; at 60×20 ` Remote (2) `. At every
+      width from 1 to 140 the top border keeps both corners and the title is
+      the long one whenever it fits, else the short one whenever that fits,
+      else the short one cut with `…`.
+    - The empty Saved list shows `No saved jobs` and `Select a job`, no bar,
+      no job, no details and no indicators at 120×30, 80×24 and 60×20, with
+      `job_scroll_max` 0; with no Remote jobs left, Remote shows `No jobs
+      match` and `Remote (0)`. Unsaving the only saved job under Saved
+      shows the toast, the empty list and `Saved (0)`, and Home's profile
+      card `Saved jobs 0`.
+    - `filter_row` for every filter at every width from 0 to 60: never
+      wider than the width; whole pills in seed order holding the active
+      label whenever it fits, with a `…` exactly on each side that leaves
+      pills out; the label cut with `…` only when it doesn't fit; the full
+      row from 36.
+    - The list card for every filter, the empty Saved list and an empty
+      Remote list at every size from 1×1 to 140×40: every row starts and
+      ends with its border, and the active label is on the filter row
+      whenever the card is tall enough and its inside as wide as the label.
+    - Footers fitted as the event loop fits them: at 80×24 (everything
+      fits) `j/k move  s save  e easy apply  f filter  1-5 tabs  q quit`
+      for All, `s save  e easy apply  f filter  1-5 tabs  q quit` for the
+      one saved job (where `j` and `k` change nothing) and
+      `f filter  1-5 tabs  q quit` for none; at 80×20 the same plus
+      `J/K scroll` for All (72 columns), Remote and the one saved job, and
+      still nothing for none. In each, `J/K scroll` is there exactly when
+      `J` changes the screen. No other tab says `filter`.
+    - Under every filter at 60×20, `J` fitted before each key stops where
+      ` ↓ more ` goes and ` ↑ more ` shows, with the last row inside the
+      card not blank, and the first `K` brings ` ↓ more ` back.
 
 These were checked by breaking the code on purpose and restoring it:
 case-sensitive matching fails 8 tests (including the `BRIGHT` one), taking
@@ -2072,6 +2280,41 @@ four-row `Layout`, which squeezes the reply box to 1 or 2 rows on a thread
 with 3 or 4 rows inside, fails `short_boxes_keep_their_input_row` (the
 every-size sweep can't see this one, since a reply box squeezed below 3
 rows has no row inside).
+
+For the job filters, each break was caught and then restored. Making `f`
+always select the filter's first job fails
+`the_filter_keeps_the_selected_job_or_moves_to_the_first_match` and
+`unsaving_under_saved_moves_to_the_next_job`; not resetting the scroll when
+`f` changes the job fails the first of those; leaving the selection alone
+when `s` drops a job from Saved fails
+`unsaving_under_saved_moves_to_the_next_job` and
+`leaving_an_empty_list_selects_the_first_match`; keeping a filter that hides
+the jumped-to job, or always going back to All, fails
+`a_search_jump_shows_the_job_even_when_the_filter_hides_it`; always drawing
+the whole filter row fails 3 (`the_filter_row_marks_the_active_pill_at_120_and_80`,
+`the_filter_row_keeps_the_active_label_and_fits_at_every_width` and
+`the_jobs_list_stays_inside_its_card_at_every_size`); always showing the
+full Jobs footer fails 3 (`jobs_footers_name_only_what_works`,
+`every_hint_set_fits_80_columns` and
+`every_key_a_footer_names_does_something`); showing `J/K scroll` whatever
+`job_scroll_max` fails 3 (`jobs_footers_name_only_what_works`,
+`every_hint_set_fits_80_columns` and `the_jobs_footer_shows_j_k_scroll`);
+always using the long title
+fails `the_list_title_counts_the_jobs_shown`; and letting `selected_job`
+ignore the filter fails 6, including
+`an_empty_saved_list_ignores_every_job_key` and
+`an_empty_list_says_so_and_selects_no_job`.
+
+After the job filters, the binary was run in a 120×30 private tmux session
+(`tmux -L wfilter`): `3` and `f` gave the Jobs capture above; `f` three
+more times and `s` showed "Job unsaved", `Jobs for you · Saved (0)` and
+`No saved jobs`; resized to 80×24, `f` then three more `f` showed
+`Jobs for you · On-site (2)` over `… Remote  Hybrid  On-site …`. `q` quit.
+After `J/K scroll` learned to follow the screen, in an 80×24 session
+(`tmux -L wfilter2`): `3` showed the footer without it, `f` four times
+`s save  e easy apply  f filter  1-5 tabs  q quit`, `s` (and Esc for the
+toast) `f filter  1-5 tabs  q quit`, and `f` then a resize to 80×20 brought
+`J/K scroll` back. The capture above was taken again then.
 
 After the movable cursor, the binary was run in a 120×30 private tmux
 session (`tmux -L wcursor`): the comment, Send picker and search captures

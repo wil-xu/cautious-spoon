@@ -15,6 +15,7 @@ use crate::data::Post;
 use crate::data::PostId;
 use crate::data::Profile;
 use crate::data::Suggestion;
+use crate::data::Workplace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
@@ -280,6 +281,59 @@ pub(crate) struct Card {
     pub repost: bool,
 }
 
+/// The Jobs tab's filter, one at a time. `f` steps through them in `ALL`'s
+/// order, wrapping from `Saved` back to `All`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobFilter {
+    All,
+    Remote,
+    Hybrid,
+    OnSite,
+    Saved,
+}
+
+impl JobFilter {
+    pub(crate) const ALL: [JobFilter; 5] = [
+        JobFilter::All,
+        JobFilter::Remote,
+        JobFilter::Hybrid,
+        JobFilter::OnSite,
+        JobFilter::Saved,
+    ];
+
+    /// The pill's text, and the name the list card's title gives it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            JobFilter::All => "All",
+            JobFilter::Remote => Workplace::Remote.label(),
+            JobFilter::Hybrid => Workplace::Hybrid.label(),
+            JobFilter::OnSite => Workplace::OnSite.label(),
+            JobFilter::Saved => "Saved",
+        }
+    }
+
+    /// The filter after this one, as `f` steps.
+    fn next(self) -> JobFilter {
+        let i = JobFilter::ALL
+            .iter()
+            .position(|&f| f == self)
+            .expect("every filter is listed in JobFilter::ALL");
+        JobFilter::ALL[(i + 1) % JobFilter::ALL.len()]
+    }
+
+    /// Whether the list shows `job` under this filter. `Saved` reads
+    /// `job.saved` as it is now.
+    pub(crate) fn matches(self, job: &Job) -> bool {
+        match self {
+            JobFilter::All => true,
+            JobFilter::Remote => job.workplace == Workplace::Remote,
+            JobFilter::Hybrid => job.workplace == Workplace::Hybrid,
+            JobFilter::OnSite => job.workplace == Workplace::OnSite,
+            JobFilter::Saved => job.saved,
+        }
+    }
+}
+
 /// How far someone is from you in your network, as a profile shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Degree {
@@ -345,9 +399,16 @@ pub(crate) struct App {
     pub post_sel: usize,
     /// Index into invitations followed by suggestions, as one list.
     pub network_sel: usize,
+    /// Index into `jobs`, not into the filtered list, so the selection
+    /// follows the job when the filter changes. It is the selected job only
+    /// while `job_filter` shows it (`selected_job`); every key that changes
+    /// the filter or what it shows moves it onto a shown job, or leaves it
+    /// when the list is empty.
     pub job_sel: usize,
+    /// Which jobs the Jobs list shows. Kept like a selection.
+    pub job_filter: JobFilter,
     /// Lines of the Jobs details card scrolled off the top, at most
-    /// `job_scroll_max`. Back to 0 whenever `job_sel` changes.
+    /// `job_scroll_max`. Back to 0 whenever the selected job changes.
     pub job_scroll: usize,
     /// How far the details card can scroll, set by `fit_job_details`.
     pub job_scroll_max: usize,
@@ -397,6 +458,7 @@ impl App {
             post_sel: 0,
             network_sel: 0,
             job_sel: 0,
+            job_filter: JobFilter::All,
             job_scroll: 0,
             job_scroll_max: 0,
             chat_sel: 0,
@@ -435,6 +497,45 @@ impl App {
 
     pub(crate) fn saved_jobs(&self) -> usize {
         self.jobs.iter().filter(|j| j.saved).count()
+    }
+
+    /// The jobs the Jobs list shows under `job_filter`, as indexes into
+    /// `jobs`, in seed order.
+    pub(crate) fn shown_jobs(&self) -> Vec<usize> {
+        (0..self.jobs.len())
+            .filter(|&i| self.job_filter.matches(&self.jobs[i]))
+            .collect()
+    }
+
+    /// The selected job, as an index into `jobs`: `job_sel` while the list
+    /// shows it. `None` only when the list is empty, where `s`, `e`, `j`,
+    /// `k`, `J` and `K` do nothing.
+    pub(crate) fn selected_job(&self) -> Option<usize> {
+        self.jobs
+            .get(self.job_sel)
+            .is_some_and(|job| self.job_filter.matches(job))
+            .then_some(self.job_sel)
+    }
+
+    /// Switches the Jobs list to `filter`. The selected job stays selected if
+    /// `filter` shows it, otherwise the first job it shows is selected. The
+    /// details go back to the top only when that changes the selected job.
+    fn set_job_filter(&mut self, filter: JobFilter) {
+        let before = self.selected_job();
+        self.job_filter = filter;
+        let shown = self.shown_jobs();
+        match before {
+            Some(i) if shown.contains(&i) => {}
+            _ => self.job_sel = shown.first().copied().unwrap_or(self.job_sel),
+        }
+        self.reset_job_scroll_if_moved(before);
+    }
+
+    /// The details card starts at the top whenever the selected job changes.
+    fn reset_job_scroll_if_moved(&mut self, before: Option<usize>) {
+        if self.selected_job() != before {
+            self.job_scroll = 0;
+        }
     }
 
     /// The post with id `id`, wherever publishing has moved it in `posts`.
@@ -649,11 +750,15 @@ impl App {
                 step(&mut self.network_sel, len, delta);
             }
             (Tab::Jobs, _) => {
-                let before = self.job_sel;
-                step(&mut self.job_sel, self.jobs.len(), delta);
-                if self.job_sel != before {
-                    self.job_scroll = 0;
-                }
+                // Through the shown jobs only. With none, nothing moves.
+                let shown = self.shown_jobs();
+                let before = self.selected_job();
+                let Some(mut row) = shown.iter().position(|&i| Some(i) == before) else {
+                    return;
+                };
+                step(&mut row, shown.len(), delta);
+                self.job_sel = shown[row];
+                self.reset_job_scroll_if_moved(before);
             }
             (Tab::Messaging, _) => step(&mut self.chat_sel, self.conversations.len(), delta),
             (Tab::Notifications, _) => step(&mut self.notif_sel, self.notifications.len(), delta),
@@ -740,6 +845,11 @@ impl App {
             }
             SearchHit::Job(i) => {
                 self.set_tab(Tab::Jobs);
+                // Search ignores the filter, so the job may be hidden: then
+                // the list goes back to all jobs, so the jump shows it.
+                if !self.jobs.get(i).is_some_and(|j| self.job_filter.matches(j)) {
+                    self.job_filter = JobFilter::All;
+                }
                 self.job_sel = i;
                 self.job_scroll = 0;
             }
@@ -1066,9 +1176,15 @@ impl App {
     }
 
     fn on_jobs_key(&mut self, code: KeyCode) {
-        let Some(job) = self.jobs.get_mut(self.job_sel) else {
+        if code == KeyCode::Char('f') {
+            self.set_job_filter(self.job_filter.next());
+            return;
+        }
+        // An empty list has no selected job, so the rest do nothing.
+        let Some(i) = self.selected_job() else {
             return;
         };
+        let job = &mut self.jobs[i];
         match code {
             KeyCode::Char('J') => self.job_scroll = (self.job_scroll + 1).min(self.job_scroll_max),
             KeyCode::Char('K') => self.job_scroll = self.job_scroll.saturating_sub(1),
@@ -1079,6 +1195,7 @@ impl App {
                 } else {
                     "Job unsaved"
                 });
+                self.drop_unsaved_job(i);
             }
             KeyCode::Char('e') if job.applied => self.status = Some("Already applied"),
             KeyCode::Char('e') => {
@@ -1087,6 +1204,26 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// After `s` on `jobs[i]`: under `Saved`, an unsaved job leaves the list
+    /// at once, and the selection keeps its row, clamped to the list, as
+    /// removing an invitation keeps `network_sel`. The next job slides under
+    /// the cursor, or the cursor moves up when the last one goes. Under any
+    /// other filter the list doesn't change, so neither does the selection.
+    fn drop_unsaved_job(&mut self, i: usize) {
+        if self.job_filter != JobFilter::Saved || self.jobs[i].saved {
+            return;
+        }
+        // The row it had, counting the jobs before it that are still shown.
+        let row = (0..i)
+            .filter(|&j| self.job_filter.matches(&self.jobs[j]))
+            .count();
+        let shown = self.shown_jobs();
+        if let Some(&next) = shown.get(row.min(shown.len().saturating_sub(1))) {
+            self.job_sel = next;
+        }
+        self.reset_job_scroll_if_moved(Some(i));
     }
 
     fn on_messaging_key(&mut self, code: KeyCode) {
@@ -5098,5 +5235,479 @@ mod tests {
                 assert!(app.status.is_none() && !app.should_quit, "{name}");
             }
         }
+    }
+
+    // ------------------------------------------------------------ Job filters
+
+    /// A fresh app on the Jobs tab.
+    fn jobs_tab() -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        app
+    }
+
+    fn shown_titles(app: &App) -> Vec<&'static str> {
+        app.shown_jobs()
+            .iter()
+            .map(|&i| app.jobs[i].title)
+            .collect()
+    }
+
+    fn selected_title(app: &App) -> Option<&'static str> {
+        app.selected_job().map(|i| app.jobs[i].title)
+    }
+
+    // The seed's jobs, by index.
+    const RUST: &str = "Senior Rust Engineer";
+    const DESIGNER: &str = "Terminal UI Designer";
+    const SRE: &str = "Site Reliability Engineer";
+    const ADVOCATE: &str = "Developer Advocate";
+    const DATA: &str = "Data Engineer";
+    const MANAGER: &str = "Engineering Manager, Build Tools";
+
+    #[test]
+    fn f_cycles_through_the_filters_and_wraps() {
+        let mut app = jobs_tab();
+        assert_eq!(app.job_filter, JobFilter::All);
+        assert_eq!(
+            shown_titles(&app),
+            [RUST, DESIGNER, SRE, ADVOCATE, DATA, MANAGER]
+        );
+        for (filter, titles) in [
+            (JobFilter::Remote, &[RUST, ADVOCATE][..]),
+            (JobFilter::Hybrid, &[DESIGNER, MANAGER]),
+            (JobFilter::OnSite, &[SRE, DATA]),
+            (JobFilter::Saved, &[RUST]),
+            (
+                JobFilter::All,
+                &[RUST, DESIGNER, SRE, ADVOCATE, DATA, MANAGER],
+            ),
+        ] {
+            press(&mut app, KeyCode::Char('f'));
+            assert_eq!(app.job_filter, filter);
+            assert_eq!(shown_titles(&app), titles, "{filter:?}");
+            assert_eq!(app.status, None, "{filter:?}: no toast");
+            assert_eq!((app.tab, app.mode), (Tab::Jobs, Mode::Browse));
+        }
+        assert_eq!(
+            JobFilter::ALL.map(JobFilter::label),
+            ["All", "Remote", "Hybrid", "On-site", "Saved"]
+        );
+    }
+
+    #[test]
+    fn the_filter_keeps_the_selected_job_or_moves_to_the_first_match() {
+        // Developer Advocate, scrolled two lines.
+        let mut app = jobs_overflowing(5);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        shift(&mut app, 'J');
+        shift(&mut app, 'J');
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(ADVOCATE), 2));
+
+        let steps = [
+            // Remote still shows him: same job, same scroll.
+            (JobFilter::Remote, ADVOCATE, 2),
+            // Hybrid doesn't: its first job, from the top.
+            (JobFilter::Hybrid, DESIGNER, 0),
+            (JobFilter::OnSite, SRE, 0),
+            (JobFilter::Saved, RUST, 0),
+            // All shows the Senior Rust Engineer too: kept, scroll and all.
+            (JobFilter::All, RUST, 1),
+        ];
+        for (filter, title, scroll) in steps {
+            press(&mut app, KeyCode::Char('f'));
+            assert_eq!(app.job_filter, filter);
+            assert_eq!(selected_title(&app), Some(title), "{filter:?}");
+            assert_eq!(app.job_sel, app.selected_job().expect("a job"));
+            assert_eq!(app.job_scroll, scroll, "{filter:?}");
+            // Scroll one line, to see whether the next `f` keeps it.
+            if filter == JobFilter::Saved {
+                shift(&mut app, 'J');
+            }
+        }
+    }
+
+    #[test]
+    fn j_and_k_stop_at_both_ends_of_a_filtered_list() {
+        let mut app = jobs_overflowing(5);
+        type_str(&mut app, "ff");
+        assert_eq!(selected_title(&app), Some(DESIGNER));
+        shift(&mut app, 'J');
+        for code in [KeyCode::Char('k'), KeyCode::Up] {
+            press(&mut app, code);
+            assert_eq!(selected_title(&app), Some(DESIGNER), "{code:?} at the top");
+            assert_eq!(app.job_scroll, 1, "{code:?} keeps the scroll");
+        }
+        // Down skips the jobs Hybrid hides.
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(MANAGER), 0));
+        shift(&mut app, 'J');
+        for code in [KeyCode::Char('j'), KeyCode::Down] {
+            press(&mut app, code);
+            assert_eq!(selected_title(&app), Some(MANAGER), "{code:?} at the end");
+            assert_eq!(app.job_scroll, 1, "{code:?} keeps the scroll");
+        }
+        press(&mut app, KeyCode::Up);
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(DESIGNER), 0));
+
+        // One job: neither moves.
+        let mut app = jobs_tab();
+        type_str(&mut app, "ffff");
+        for code in [KeyCode::Char('j'), KeyCode::Char('k')] {
+            press(&mut app, code);
+            assert_eq!(selected_title(&app), Some(RUST), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_saved_list_ignores_every_job_key() {
+        let mut app = jobs_overflowing(5);
+        press(&mut app, KeyCode::Char('s'));
+        type_str(&mut app, "ffff");
+        assert_eq!(app.job_filter, JobFilter::Saved);
+        assert!(app.shown_jobs().is_empty());
+        assert_eq!(app.selected_job(), None);
+        assert_eq!(app.saved_jobs(), 0);
+        app.status = None;
+
+        let before = (unscrolled(&app), app.job_scroll, app.job_filter);
+        for ch in "sejkJK".chars() {
+            if ch.is_uppercase() {
+                shift(&mut app, ch);
+            } else {
+                press(&mut app, KeyCode::Char(ch));
+            }
+            assert_eq!(
+                (unscrolled(&app), app.job_scroll, app.job_filter),
+                before,
+                "{ch}"
+            );
+        }
+        for code in [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Enter,
+            KeyCode::Char('v'),
+        ] {
+            press(&mut app, code);
+            assert_eq!(
+                (unscrolled(&app), app.job_scroll, app.job_filter),
+                before,
+                "{code:?}"
+            );
+        }
+
+        // `f` still works.
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.job_filter, JobFilter::All);
+        assert_eq!(selected_title(&app), Some(RUST));
+    }
+
+    #[test]
+    fn leaving_an_empty_list_selects_the_first_match() {
+        // Data Engineer saved too, then both unsaved under Saved, the Senior
+        // Rust Engineer first, so `job_sel` is left on the Data Engineer.
+        let mut app = jobs_tab();
+        type_str(&mut app, "jjjjs");
+        type_str(&mut app, "ffff");
+        assert_eq!(shown_titles(&app), [RUST, DATA]);
+        // Remote moved the selection off him, so Saved starts on its first.
+        assert_eq!(selected_title(&app), Some(RUST));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(selected_title(&app), Some(DATA));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.selected_job(), None);
+        // Nothing was selected, so `All` selects its first job.
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(
+            (app.job_filter, selected_title(&app)),
+            (JobFilter::All, Some(RUST))
+        );
+    }
+
+    /// Jobs on Saved with three saved jobs, the Senior Rust Engineer (the
+    /// seed's), the Site Reliability Engineer and the Data Engineer, the last
+    /// selected and scrolled a line.
+    fn three_saved() -> App {
+        let mut app = jobs_overflowing(5);
+        type_str(&mut app, "jjsjjs");
+        type_str(&mut app, "ffff");
+        assert_eq!(app.job_filter, JobFilter::Saved);
+        assert_eq!(shown_titles(&app), [RUST, SRE, DATA]);
+        // On-site left the Site Reliability Engineer selected, and Saved
+        // keeps him.
+        assert_eq!(selected_title(&app), Some(SRE));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(selected_title(&app), Some(DATA));
+        shift(&mut app, 'J');
+        app
+    }
+
+    #[test]
+    fn unsaving_under_saved_moves_to_the_next_job() {
+        // The first row: the next job slides under the cursor.
+        let mut app = three_saved();
+        type_str(&mut app, "kk");
+        shift(&mut app, 'J');
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job unsaved"));
+        assert_eq!(shown_titles(&app), [SRE, DATA]);
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(SRE), 0));
+        assert_eq!(app.saved_jobs(), 2);
+
+        // A middle row: the same.
+        let mut app = three_saved();
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job unsaved"));
+        assert_eq!(shown_titles(&app), [RUST, DATA]);
+        assert_eq!(selected_title(&app), Some(DATA));
+
+        // The last row: the cursor moves up to the new last job.
+        let mut app = three_saved();
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job unsaved"));
+        assert_eq!(shown_titles(&app), [RUST, SRE]);
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(SRE), 0));
+
+        // Down to none, each with its toast.
+        for left in [1, 0] {
+            press(&mut app, KeyCode::Char('s'));
+            assert_eq!(app.status, Some("Job unsaved"));
+            assert_eq!(app.shown_jobs().len(), left);
+        }
+        assert_eq!((app.selected_job(), app.saved_jobs()), (None, 0));
+        // The jobs are still there for the other filters.
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(app.shown_jobs().len(), 6);
+    }
+
+    #[test]
+    fn saving_under_other_filters_keeps_the_selection() {
+        let mut app = jobs_overflowing(5);
+        press(&mut app, KeyCode::Char('j'));
+        shift(&mut app, 'J');
+        for want in ["Job saved", "Job unsaved"] {
+            press(&mut app, KeyCode::Char('s'));
+            assert_eq!(app.status, Some(want));
+            assert_eq!((selected_title(&app), app.job_scroll), (Some(DESIGNER), 1));
+            assert_eq!(app.shown_jobs().len(), 6);
+        }
+
+        // Unsaving under Remote leaves the job in the Remote list.
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(selected_title(&app), Some(RUST));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job unsaved"));
+        assert_eq!(selected_title(&app), Some(RUST));
+        assert_eq!(shown_titles(&app), [RUST, ADVOCATE]);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.status, Some("Job saved"));
+        assert_eq!(selected_title(&app), Some(ADVOCATE));
+        assert_eq!(app.saved_jobs(), 1);
+
+        // Saved now lists him alone, and keeps him selected.
+        type_str(&mut app, "fff");
+        assert_eq!(shown_titles(&app), [ADVOCATE]);
+        assert_eq!(selected_title(&app), Some(ADVOCATE));
+    }
+
+    /// Opens search, types `query` and presses Enter on the job result
+    /// titled `title`.
+    fn jump_to_job(app: &mut App, query: &str, title: &str) {
+        let down = app
+            .search_hits(query)
+            .iter()
+            .position(|&hit| matches!(hit, SearchHit::Job(i) if app.jobs[i].title == title))
+            .unwrap_or_else(|| panic!("{query:?} finds {title}"));
+        jump(app, query, down);
+    }
+
+    #[test]
+    fn a_search_jump_shows_the_job_even_when_the_filter_hides_it() {
+        // Hidden by Hybrid: back to All.
+        let mut app = jobs_overflowing(5);
+        type_str(&mut app, "ff");
+        shift(&mut app, 'J');
+        jump_to_job(&mut app, "lisbon", RUST);
+        assert_eq!(app.tab, Tab::Jobs);
+        assert_eq!(app.job_filter, JobFilter::All);
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(RUST), 0));
+
+        // Shown by Remote: the filter stays.
+        let mut app = jobs_overflowing(5);
+        press(&mut app, KeyCode::Char('f'));
+        shift(&mut app, 'J');
+        jump_to_job(&mut app, "brightkettle", ADVOCATE);
+        assert_eq!(app.job_filter, JobFilter::Remote);
+        assert_eq!((selected_title(&app), app.job_scroll), (Some(ADVOCATE), 0));
+
+        // From another tab, under Saved, to a job that isn't saved.
+        let mut app = jobs_tab();
+        type_str(&mut app, "ffff");
+        press(&mut app, KeyCode::Char('1'));
+        jump_to_job(&mut app, "robotics", DATA);
+        assert_eq!((app.tab, app.job_filter), (Tab::Jobs, JobFilter::All));
+        assert_eq!(selected_title(&app), Some(DATA));
+
+        // From an empty Saved list.
+        let mut app = jobs_tab();
+        type_str(&mut app, "sffff");
+        assert!(app.shown_jobs().is_empty());
+        jump_to_job(&mut app, "lisbon", RUST);
+        assert_eq!(app.job_filter, JobFilter::All);
+        assert_eq!(selected_title(&app), Some(RUST));
+    }
+
+    #[test]
+    fn search_finds_every_job_whatever_the_filter() {
+        let jobs = |app: &App| -> Vec<&'static str> {
+            app.search_hits("engineer")
+                .into_iter()
+                .filter_map(|hit| match hit {
+                    SearchHit::Job(i) => Some(app.jobs[i].title),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut app = jobs_tab();
+        let all = jobs(&app);
+        assert_eq!(all, [RUST, SRE, DATA, MANAGER]);
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Char('f'));
+            assert_eq!(jobs(&app), all, "{:?}", app.job_filter);
+        }
+    }
+
+    #[test]
+    fn the_filter_is_kept_like_a_selection() {
+        let mut app = jobs_overflowing(5);
+        type_str(&mut app, "fffj");
+        let kept = (JobFilter::OnSite, 4);
+        assert_eq!(selected_title(&app), Some(DATA));
+        let check = |app: &App, what: &str| {
+            assert_eq!((app.job_filter, app.job_sel), kept, "{what}");
+        };
+
+        type_str(&mut app, "13");
+        check(&app, "1 then 3");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::BackTab);
+        check(&app, "Tab then BackTab");
+        press(&mut app, KeyCode::Char('/'));
+        type_str(&mut app, "rust");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.tab, Tab::Jobs);
+        check(&app, "/ then Esc");
+
+        // A profile, opened on Home, closed with Esc and with a tab switch.
+        type_str(&mut app, "1v");
+        assert!(app.profile_page.is_some());
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('3'));
+        check(&app, "a profile then Esc");
+        type_str(&mut app, "1v3");
+        assert!(app.profile_page.is_none());
+        check(&app, "a profile then 3");
+
+        type_str(&mut app, "ssee");
+        check(&app, "s and e");
+        shift(&mut app, 'J');
+        shift(&mut app, 'K');
+        check(&app, "J and K");
+
+        // A search jump anywhere but to a job leaves it alone.
+        jump(&mut app, "typo", 0);
+        assert_eq!(app.tab, Tab::Home);
+        press(&mut app, KeyCode::Char('3'));
+        check(&app, "a jump to a post");
+    }
+
+    #[test]
+    fn f_does_nothing_off_jobs() {
+        let routes: [&[KeyCode]; 8] = [
+            &[KeyCode::Char('1')],
+            &[KeyCode::Char('1'), KeyCode::Enter],
+            &[KeyCode::Char('1'), KeyCode::Char('v')],
+            &[KeyCode::Char('2')],
+            &[KeyCode::Char('2'), KeyCode::Char('v')],
+            &[KeyCode::Char('4')],
+            &[KeyCode::Char('4'), KeyCode::Enter, KeyCode::Esc],
+            &[KeyCode::Char('5')],
+        ];
+        for route in routes {
+            // With the filter on Remote, to see it isn't stepped.
+            let mut app = jobs_tab();
+            press(&mut app, KeyCode::Char('f'));
+            for &key in route {
+                press(&mut app, key);
+            }
+            let before = (world(&app), app.profile_page, app.job_filter);
+            press(&mut app, KeyCode::Char('f'));
+            assert_eq!(
+                (world(&app), app.profile_page, app.job_filter),
+                before,
+                "{route:?}"
+            );
+            assert_eq!(app.status, None, "{route:?}: no toast");
+            assert_eq!(app.job_filter, JobFilter::Remote, "{route:?}");
+        }
+    }
+
+    #[test]
+    fn f_is_typed_in_every_text_box() {
+        // Each box opened with the filter on Remote.
+        let remote = || {
+            let mut app = jobs_tab();
+            press(&mut app, KeyCode::Char('f'));
+            app
+        };
+
+        for tab in ['1', '2', '3', '4', '5'] {
+            let mut app = remote();
+            press(&mut app, KeyCode::Char(tab));
+            press(&mut app, KeyCode::Char('/'));
+            let before = snapshot(&app);
+            type_str(&mut app, "ff");
+            assert_eq!(query(&app), Some("ff"), "search on {tab}");
+            assert_eq!(snapshot(&app), before, "search on {tab}");
+            assert_eq!(app.job_filter, JobFilter::Remote, "search on {tab}");
+        }
+
+        let mut app = remote();
+        type_str(&mut app, "1p");
+        type_str(&mut app, "ff");
+        assert_eq!((app.draft.text(), app.mode), ("ff", Mode::Composer));
+        assert_eq!(app.job_filter, JobFilter::Remote, "composer");
+
+        let mut app = remote();
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('c'));
+        type_str(&mut app, "ff");
+        assert_eq!(app.comment_draft.text(), "ff");
+        assert_eq!(app.job_filter, JobFilter::Remote, "comment box");
+
+        for keys in [&[][..], &[KeyCode::Enter]] {
+            let mut app = remote();
+            press(&mut app, KeyCode::Char('1'));
+            for &key in keys {
+                press(&mut app, key);
+            }
+            press(&mut app, KeyCode::Char('s'));
+            type_str(&mut app, "ff");
+            assert_eq!(filter(&app), Some("ff"), "picker after {keys:?}");
+            assert_eq!(app.job_filter, JobFilter::Remote, "picker after {keys:?}");
+        }
+
+        let mut app = remote();
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Enter);
+        type_str(&mut app, "ff");
+        assert_eq!((app.reply.text(), app.mode), ("ff", Mode::Reply));
+        assert_eq!(app.job_filter, JobFilter::Remote, "reply box");
     }
 }

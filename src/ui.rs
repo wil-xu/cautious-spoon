@@ -20,6 +20,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::App;
 use crate::app::Card;
+use crate::app::JobFilter;
 use crate::app::Mode;
 use crate::app::NetworkItem;
 use crate::app::ProfileAction;
@@ -565,17 +566,8 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("1-5", "tabs"),
             ("q", "quit"),
         ],
-        (Tab::Jobs, Mode::Browse) => vec![
-            ("j/k", "move"),
-            ("s", "save"),
-            ("e", "easy apply"),
-            ("tab", "next"),
-            ("1-5", "tabs"),
-            ("q", "quit"),
-            // Last, so every footer narrower than the full set reads as it
-            // did before the details could scroll.
-            ("J/K", "scroll"),
-        ],
+        // `f filter` took `tab next`'s place; see `jobs_hints`.
+        (Tab::Jobs, Mode::Browse) => jobs_hints(app),
         (Tab::Messaging, Mode::Browse) => vec![
             ("j/k", "move"),
             ("enter", "open"),
@@ -591,6 +583,36 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("q", "quit"),
         ],
     }
+}
+
+/// The Jobs hints, from the filtered list and the screen. `f filter` took
+/// `tab next`'s place: with it the full set would be 82 columns. `Tab` still
+/// works, as it does on Home, `1-5 tabs` names the numbers the header shows,
+/// and every other tab's footer still says `tab next`. Dropping `q quit` or
+/// cutting `e easy apply` short would have saved too little, and `J/K scroll`
+/// is the only cue that the details scroll. `j/k move` needs two shown jobs,
+/// as `j/k comments` needs two comments. `J/K scroll` needs the selected
+/// job's details to overflow the card on this screen (`job_scroll_max`, which
+/// the event loop sets before every frame): at 80×24 every seed job fits, and
+/// `J` and `K` do nothing. An empty list leaves only
+/// `f filter  1-5 tabs  q quit`, since `s`, `e`, `j`, `k`, `J` and `K` do
+/// nothing there.
+fn jobs_hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    let shown = app.shown_jobs().len();
+    let mut hints = Vec::new();
+    if shown >= 2 {
+        hints.push(("j/k", "move"));
+    }
+    if shown >= 1 {
+        hints.extend([("s", "save"), ("e", "easy apply")]);
+    }
+    hints.extend([("f", "filter"), ("1-5", "tabs"), ("q", "quit")]);
+    if app.selected_job().is_some() && app.job_scroll_max > 0 {
+        // Last, so every footer narrower than the full set reads as the
+        // set without it.
+        hints.push(("J/K", "scroll"));
+    }
+    hints
 }
 
 /// A text box's hints: `base`, then `←/→ cursor` once the box holds text,
@@ -1972,28 +1994,154 @@ fn job_detail_lines(job: &Job, width: usize) -> Vec<Line<'static>> {
 /// The lines of the selected job's details that don't fit in the card on a
 /// `screen`-sized terminal: how far `J` can scroll. The event loop hands it to
 /// `App::fit_job_details` before every frame, since `App` never sees the
-/// screen.
+/// screen. With no job selected (an empty filtered list) there is nothing to
+/// scroll.
 pub(crate) fn job_scroll_max(app: &App, screen: Size) -> usize {
     let body = screen_areas(Rect::from((Position::ORIGIN, screen)))[1];
     let inner = card(JOB_DETAILS, false).inner(jobs_areas(body)[1]);
-    app.jobs.get(app.job_sel).map_or(0, |job| {
-        job_detail_lines(job, usize_of(inner.width))
+    app.selected_job().map_or(0, |i| {
+        job_detail_lines(&app.jobs[i], usize_of(inner.width))
             .len()
             .saturating_sub(usize_of(inner.height))
     })
 }
 
+const JOBS_FOR_YOU: &str = " Jobs for you ";
+/// Columns between two filter pills.
+const PILL_GAP: &str = "  ";
+/// Stands for the pills a narrow filter row leaves out on that side.
+const MORE_PILLS: &str = "…";
+const NO_SAVED_JOBS: &str = "No saved jobs";
+const NO_JOBS_MATCH: &str = "No jobs match";
+const SELECT_A_JOB: &str = "Select a job";
+
+/// The list card's title for a card `width` columns wide: ` Jobs for you `
+/// with `All`, otherwise also the filter and how many jobs it shows,
+/// ` Jobs for you · Remote (2) `. On a card too narrow for that it drops
+/// `Jobs for you`, ` Remote (2) `, and narrower still that is cut with `…`,
+/// so it never runs into the corners.
+fn jobs_title(app: &App, width: u16) -> String {
+    if app.job_filter == JobFilter::All {
+        return JOBS_FOR_YOU.to_owned();
+    }
+    let room = usize_of(width.saturating_sub(2));
+    let short = format!(" {} ({}) ", app.job_filter.label(), app.shown_jobs().len());
+    let long = format!("{}·{short}", JOBS_FOR_YOU);
+    if width_of(&long) <= room {
+        long
+    } else if width_of(&short) <= room {
+        short
+    } else {
+        truncate(&short, room)
+    }
+}
+
+/// The filter pills for a list card `width` columns wide inside its padding,
+/// `All  Remote  Hybrid  On-site  Saved` with the active one bold, light blue
+/// and underlined. Like a list row, it starts after the selection bar's
+/// column. When the whole row doesn't fit, it shows the run of whole pills
+/// that holds the active one and starts as early as possible, with a dim `…`
+/// on each side that leaves pills out. When not even the active pill fits
+/// with a `…`, it shows alone, then without the bar's column, and only on a
+/// card narrower than its label is it cut with `…`.
+fn filter_row(active: JobFilter, width: usize) -> Line<'static> {
+    let pills = JobFilter::ALL;
+    let a = pills
+        .iter()
+        .position(|&f| f == active)
+        .expect("every filter is listed in JobFilter::ALL");
+    let last_pill = pills.len() - 1;
+    let gap = width_of(PILL_GAP);
+    let marker = width_of(MORE_PILLS) + 1;
+    // Pills `first..=last`, the gaps between them and the markers they need.
+    let run_width = |first: usize, last: usize| {
+        pills[first..=last]
+            .iter()
+            .map(|f| width_of(f.label()))
+            .sum::<usize>()
+            + gap * (last - first)
+            + if first > 0 { marker } else { 0 }
+            + if last < last_pill { marker } else { 0 }
+    };
+    let text_width = width.saturating_sub(1);
+    let pill_style = |f: JobFilter| {
+        if f == active {
+            Style::new()
+                .fg(LIGHT_BLUE)
+                .bold()
+                .add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(DIM)
+        }
+    };
+    let dim = Style::new().fg(DIM);
+
+    let Some(first) = (0..=a).find(|&first| run_width(first, a) <= text_width) else {
+        let label = active.label();
+        let mut spans = Vec::new();
+        if width_of(label) <= text_width {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(truncate(label, width), pill_style(active)));
+        return Line::from(spans);
+    };
+    let mut last = a;
+    while last < last_pill && run_width(first, last + 1) <= text_width {
+        last += 1;
+    }
+    let mut spans = vec![Span::raw(" ")];
+    if first > 0 {
+        spans.push(Span::styled(format!("{MORE_PILLS} "), dim));
+    }
+    for (n, &f) in pills[first..=last].iter().enumerate() {
+        if n > 0 {
+            spans.push(Span::raw(PILL_GAP));
+        }
+        spans.push(Span::styled(f.label(), pill_style(f)));
+    }
+    if last < last_pill {
+        spans.push(Span::styled(format!(" {MORE_PILLS}"), dim));
+    }
+    Line::from(spans)
+}
+
+/// The filter row and the job rows below it, inside the list card.
+fn jobs_list_areas(inner: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner)
+}
+
 fn render_jobs(frame: &mut Frame, app: &App, area: Rect) {
     let [list_area, detail_area] = jobs_areas(area);
 
-    let block = card(" Jobs for you ", false);
+    let title = jobs_title(app, list_area.width);
+    let block = card(&title, false);
     let inner = block.inner(list_area);
     frame.render_widget(block, list_area);
+    let [filter_area, rows_area] = jobs_list_areas(inner);
+    frame.render_widget(
+        filter_row(app.job_filter, usize_of(inner.width)),
+        filter_area,
+    );
     let width = usize_of(inner.width.saturating_sub(1));
-    let items = app
-        .jobs
+    let shown = app.shown_jobs();
+    if shown.is_empty() {
+        let message = if app.job_filter == JobFilter::Saved {
+            NO_SAVED_JOBS
+        } else {
+            NO_JOBS_MATCH
+        };
+        frame.render_widget(
+            Line::styled(
+                format!(" {}", truncate(message, width)),
+                Style::new().fg(DIM),
+            ),
+            rows_area,
+        );
+    }
+    let items = shown
         .iter()
-        .map(|job| {
+        .map(|&i| {
+            let job = &app.jobs[i];
             let star = if job.saved { " ★" } else { "" };
             let mut place = vec![Span::styled(
                 format!("{} · {}", job.location, job.workplace.label()),
@@ -2015,9 +2163,20 @@ fn render_jobs(frame: &mut Frame, app: &App, area: Rect) {
             ]
         })
         .collect();
-    render_list(frame, inner, items, Some(app.job_sel));
+    let row = shown.iter().position(|&i| Some(i) == app.selected_job());
+    render_list(frame, rows_area, items, row);
 
-    let Some(job) = app.jobs.get(app.job_sel) else {
+    let Some(job) = app.selected_job().map(|i| &app.jobs[i]) else {
+        let block = card(JOB_DETAILS, false);
+        let inner = block.inner(detail_area);
+        frame.render_widget(block, detail_area);
+        let [_, middle, _] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(inner);
+        frame.render_widget(Paragraph::new(SELECT_A_JOB).fg(DIM).centered(), middle);
         return;
     };
     let mut block = card(JOB_DETAILS, false);
@@ -2420,6 +2579,13 @@ mod tests {
                 "search over profile",
                 at(&[KeyCode::Char('v'), KeyCode::Char('/')], "maren"),
             ),
+            ("jobs remote", at(&[KeyCode::Char('3')], "f")),
+            ("jobs saved", at(&[KeyCode::Char('3')], "ffff")),
+            ("jobs saved empty", {
+                let mut app = at(&[KeyCode::Char('3')], "sffff");
+                app.status = None;
+                app
+            }),
         ]
     }
 
@@ -3427,8 +3593,12 @@ mod tests {
         let mut app = jobs_after_j(20, 60, 20);
         assert!(app.job_scroll > 0);
         // The first frame at the new size, before the app hears of it, and
-        // the ones after.
-        assert_eq!(screen(&app, 120, 30), unscrolled);
+        // the ones after. Until it hears, only the footer, which follows
+        // the screen the app was last fitted to, still offers `J/K scroll`.
+        // The event loop fits before every frame, so that one is never
+        // drawn.
+        let body = |s: &str| s.lines().take(29).collect::<Vec<_>>().join("\n");
+        assert_eq!(body(&screen(&app, 120, 30)), body(&unscrolled));
         fit(&mut app, 120, 30);
         assert_eq!(app.job_scroll, 0);
         assert_eq!(screen(&app, 120, 30), unscrolled);
@@ -3521,9 +3691,11 @@ mod tests {
 
     #[test]
     fn the_jobs_footer_shows_j_k_scroll() {
-        let app = jobs_after_j(0, 80, 24);
+        // At 80×20 the Senior Rust Engineer's details overflow the card.
+        let app = jobs_after_j(0, 80, 20);
+        assert!(app.job_scroll_max > 0);
         let footer = |app: &App, width: u16| {
-            screen(app, width, 24)
+            screen(app, width, 20)
                 .lines()
                 .last()
                 .expect("screen has rows")
@@ -3532,11 +3704,11 @@ mod tests {
         let full = footer(&app, 80);
         assert_eq!(
             full.trim(),
-            "j/k move  s save  e easy apply  tab next  1-5 tabs  q quit  J/K scroll"
+            "j/k move  s save  e easy apply  f filter  1-5 tabs  q quit  J/K scroll"
         );
-        // The Jobs footer before `J/K scroll`. At every narrower width the
+        // The Jobs footer without `J/K scroll`. At every narrower width the
         // footer starts with exactly what that one showed there.
-        let before = " j/k move  s save  e easy apply  tab next  1-5 tabs  q quit ";
+        let before = " j/k move  s save  e easy apply  f filter  1-5 tabs  q quit ";
         for width in 1..80 {
             let shown: String = before.chars().take(usize::from(width)).collect();
             let row = footer(&app, width);
@@ -3553,6 +3725,13 @@ mod tests {
             press(&mut app, KeyCode::Char(tab));
             assert!(!footer(&app, 80).contains("J/K"), "tab {tab}");
         }
+        // Where the details fit, `J` and `K` do nothing, so it isn't there.
+        let fits = jobs_after_j(0, 80, 24);
+        assert_eq!(fits.job_scroll_max, 0);
+        assert_eq!(
+            footer_at_80(&fits),
+            "j/k move  s save  e easy apply  f filter  1-5 tabs  q quit"
+        );
     }
 
     #[test]
@@ -3638,7 +3817,7 @@ mod tests {
                 seen.push(set);
             }
         }
-        assert_eq!(seen.len(), 24, "every hint set was checked");
+        assert_eq!(seen.len(), 27, "every hint set was checked");
     }
 
     fn header_row(app: &App, width: u16, height: u16) -> String {
@@ -6064,6 +6243,15 @@ mod tests {
                 &['j', 'k', 'x'],
             ),
             (
+                "jobs, no saved jobs",
+                Box::new(|| {
+                    let mut app = App::new();
+                    type_str(&mut app, "3sffff");
+                    app
+                }),
+                &['j', 'k', 's', 'e', 'J', 'K'],
+            ),
+            (
                 "post view, your only comment",
                 Box::new(|| {
                     let mut app = post_view(7);
@@ -6551,6 +6739,468 @@ mod tests {
             press(&mut app, KeyCode::Right);
             assert_ne!(screen(&app, 120, 30), moved, "→ moves it back");
             assert_eq!(screen(&app, 120, 30), before);
+        }
+    }
+
+    // ---------------------------------------------------------- Job filters
+
+    /// Jobs after typing `keys` there, with any toast cleared.
+    fn jobs_after(keys: &str) -> App {
+        let mut app = App::new();
+        press(&mut app, KeyCode::Char('3'));
+        type_str(&mut app, keys);
+        app.status = None;
+        app
+    }
+
+    /// The five filters, each with the keys that reach it from a fresh Jobs
+    /// tab and the jobs it shows in the seed.
+    const FILTERS: [(&str, &str, &[&str]); 5] = [
+        (
+            "",
+            "All",
+            &[
+                "Senior Rust Engineer",
+                "Terminal UI Designer",
+                "Site Reliability Engineer",
+                "Developer Advocate",
+                "Data Engineer",
+                "Engineering Manager, Build Tools",
+            ],
+        ),
+        (
+            "f",
+            "Remote",
+            &["Senior Rust Engineer", "Developer Advocate"],
+        ),
+        (
+            "ff",
+            "Hybrid",
+            &["Terminal UI Designer", "Engineering Manager, Build Tools"],
+        ),
+        (
+            "fff",
+            "On-site",
+            &["Site Reliability Engineer", "Data Engineer"],
+        ),
+        ("ffff", "Saved", &["Senior Rust Engineer"]),
+    ];
+
+    /// The Jobs list card on a `width`×`height` screen.
+    fn job_list_card(width: u16, height: u16) -> Rect {
+        jobs_areas(screen_areas(Rect::new(0, 0, width, height))[1])[0]
+    }
+
+    /// Row `y` of `rect` on `buf`, cell by cell.
+    fn rect_row(buf: &Buffer, rect: Rect, y: u16) -> String {
+        (rect.left()..rect.right())
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    /// The filter row inside the list card's border and padding, trimmed.
+    fn filter_text(app: &App, width: u16, height: u16) -> String {
+        let card = job_list_card(width, height);
+        let row = rect_row(&buffer(app, width, height), card, card.y + 1);
+        let inside: String = row.chars().skip(1).take(row.chars().count() - 2).collect();
+        inside.trim().to_owned()
+    }
+
+    #[test]
+    fn the_filter_row_marks_the_active_pill_at_120_and_80() {
+        let at_80 = [
+            "All  Remote  Hybrid …",
+            "All  Remote  Hybrid …",
+            "All  Remote  Hybrid …",
+            "… Remote  Hybrid  On-site …",
+            "… Hybrid  On-site  Saved",
+        ];
+        for ((keys, label, _), narrow) in FILTERS.iter().zip(at_80) {
+            let app = jobs_after(keys);
+            assert_eq!(app.job_filter.label(), *label);
+            assert_eq!(
+                filter_text(&app, 120, 30),
+                "All  Remote  Hybrid  On-site  Saved",
+                "{label}"
+            );
+            assert_eq!(filter_text(&app, 80, 24), narrow, "{label}");
+
+            // Exactly the active pill's cells are bold, light blue and
+            // underlined; the other pills and the markers are dim.
+            for (width, height) in [(120, 30), (80, 24)] {
+                let buf = buffer(&app, width, height);
+                let card = job_list_card(width, height);
+                let y = card.y + 1;
+                let row = rect_row(&buf, card, y);
+                let start = column_of(&row, &format!(" {label}"))
+                    .unwrap_or_else(|| panic!("{label} at {width}: {row:?}"))
+                    + 1;
+                let marked: Vec<usize> = (0..usize_of(card.width))
+                    .filter(|&x| {
+                        let cell = &buf[(card.x + u16_of(x), y)];
+                        cell.modifier.contains(Modifier::UNDERLINED)
+                    })
+                    .collect();
+                assert_eq!(
+                    marked,
+                    (start..start + label.len()).collect::<Vec<_>>(),
+                    "{label} at {width}: {row:?}"
+                );
+                for x in marked {
+                    let cell = &buf[(card.x + u16_of(x), y)];
+                    assert_eq!(cell.fg, LIGHT_BLUE, "{label} at {width}");
+                    assert!(cell.modifier.contains(Modifier::BOLD), "{label}");
+                }
+                for (i, ch) in row.chars().enumerate() {
+                    let cell = &buf[(card.x + u16_of(i), y)];
+                    if ch.is_alphanumeric() || ch == '…' {
+                        let active = (start..start + label.len()).contains(&i);
+                        assert_eq!(cell.fg == DIM, !active, "{label} at {width}: {i}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_filter_lists_its_jobs_below_the_filter_row() {
+        for (keys, label, titles) in FILTERS {
+            let app = jobs_after(keys);
+            let s = screen(&app, 120, 40);
+            for job in crate::data::jobs() {
+                assert_eq!(
+                    s.contains(job.title),
+                    titles.contains(&job.title),
+                    "{label}: {}\n{s}",
+                    job.title
+                );
+            }
+            // In seed order, three rows each, from the row under the pills,
+            // the first selected.
+            let card = job_list_card(120, 40);
+            let buf = buffer(&app, 120, 40);
+            for (n, title) in titles.iter().enumerate() {
+                let y = card.y + 2 + 3 * u16_of(n);
+                let row = rect_row(&buf, card, y);
+                let bar = if n == 0 { '▌' } else { ' ' };
+                assert!(
+                    row.starts_with(&format!("│ {bar}{title}")),
+                    "{label} row {n}: {row:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_title_counts_the_jobs_shown() {
+        let top = |app: &App, width: u16, height: u16| {
+            let card = job_list_card(width, height);
+            rect_row(&buffer(app, width, height), card, card.y)
+        };
+        let want = [
+            "╭ Jobs for you ─",
+            "╭ Jobs for you · Remote (2) ─",
+            "╭ Jobs for you · Hybrid (2) ─",
+            "╭ Jobs for you · On-site (2) ─",
+            "╭ Jobs for you · Saved (1) ─",
+        ];
+        for ((keys, label, _), want) in FILTERS.iter().zip(want) {
+            let app = jobs_after(keys);
+            for (width, height) in [(120, 30), (80, 24)] {
+                let row = top(&app, width, height);
+                assert!(row.starts_with(want), "{label} at {width}: {row:?}");
+            }
+        }
+        // The empty list counts 0, and a narrow card drops `Jobs for you`.
+        let empty = jobs_after("sffff");
+        assert!(top(&empty, 120, 30).starts_with("╭ Jobs for you · Saved (0) ─"));
+        assert!(top(&jobs_after("f"), 60, 20).starts_with("╭ Remote (2) ─"));
+        assert!(top(&jobs_after(""), 60, 20).starts_with("╭ Jobs for you ─"));
+
+        // At every width the title stays between the corners: the long one,
+        // the short one, or the short one cut with `…`.
+        for (keys, label, titles) in FILTERS.iter().skip(1) {
+            let app = jobs_after(keys);
+            let long = format!("Jobs for you · {label} ({})", titles.len());
+            let short = format!("{label} ({})", titles.len());
+            for width in 1..=140 {
+                let card = job_list_card(width, 10);
+                if card.width < 2 {
+                    continue;
+                }
+                let row = top(&app, width, 10);
+                assert!(
+                    row.starts_with('╭') && row.ends_with('╮'),
+                    "{label} at {width}: {row:?}"
+                );
+                let title = row.trim_matches(['╭', '╮', '─']).trim();
+                assert!(
+                    title.is_empty()
+                        || title == long
+                        || title == short
+                        || title.ends_with('…') && short.starts_with(title.trim_end_matches('…')),
+                    "{label} at {width}: {row:?}"
+                );
+                let room = usize_of(card.width) - 2;
+                if width_of(&long) + 2 <= room {
+                    assert_eq!(title, long, "{label} at {width}");
+                } else if width_of(&short) + 2 <= room {
+                    assert_eq!(title, short, "{label} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_list_says_so_and_selects_no_job() {
+        let app = jobs_after("sffff");
+        assert!(app.shown_jobs().is_empty());
+        for (width, height) in [(120, 30), (80, 24), (60, 20)] {
+            let s = screen(&app, width, height);
+            assert!(s.contains("No saved jobs"), "{width}:\n{s}");
+            assert!(s.contains("Select a job"), "{width}:\n{s}");
+            assert!(!s.contains('▌'), "nothing selected at {width}:\n{s}");
+            assert!(!s.contains("Senior Rust"), "no job at {width}:\n{s}");
+            assert!(!s.contains("About the job"), "no details at {width}:\n{s}");
+            assert!(!s.contains("more "), "nothing to scroll at {width}:\n{s}");
+        }
+        assert_eq!(job_scroll_max(&app, Size::new(60, 20)), 0);
+
+        // Any other filter with nothing to show says `No jobs match`.
+        let mut app = App::new();
+        app.jobs
+            .retain(|j| j.workplace != crate::data::Workplace::Remote);
+        type_str(&mut app, "3f");
+        assert!(app.shown_jobs().is_empty());
+        let s = screen(&app, 120, 30);
+        assert!(
+            s.contains("No jobs match") && !s.contains("No saved jobs"),
+            "{s}"
+        );
+        assert!(s.contains("Jobs for you · Remote (0)"), "{s}");
+        assert!(s.contains("Select a job"), "{s}");
+    }
+
+    #[test]
+    fn unsaving_under_saved_empties_the_list_on_screen() {
+        let mut app = jobs_after("ffff");
+        assert!(screen(&app, 120, 30).contains("Senior Rust Engineer ★"));
+        press(&mut app, KeyCode::Char('s'));
+        let s = screen(&app, 120, 30);
+        assert!(s.contains(" Job unsaved "), "{s}");
+        assert!(
+            s.contains("No saved jobs") && !s.contains("Senior Rust"),
+            "{s}"
+        );
+        assert!(s.contains("Jobs for you · Saved (0)"), "{s}");
+        // The profile card's count follows.
+        press(&mut app, KeyCode::Char('1'));
+        assert!(screen(&app, 120, 30).contains("Saved jobs         0"));
+    }
+
+    #[test]
+    fn the_filter_row_keeps_the_active_label_and_fits_at_every_width() {
+        let labels: Vec<&str> = JobFilter::ALL.iter().map(|f| f.label()).collect();
+        for active in JobFilter::ALL {
+            let label = active.label();
+            for width in 0..=60 {
+                let line = filter_row(active, width);
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(line.width() <= width.max(1), "{label} at {width}: {text:?}");
+                if width_of(label) <= width {
+                    // Whole pills, in order, holding the active one in full.
+                    let words: Vec<&str> = text.split_whitespace().collect();
+                    let pills: Vec<&str> = words.iter().copied().filter(|w| *w != "…").collect();
+                    assert!(pills.contains(&label), "{label} at {width}: {text:?}");
+                    let first = labels
+                        .iter()
+                        .position(|l| *l == pills[0])
+                        .unwrap_or_else(|| panic!("{label} at {width}: {text:?}"));
+                    assert_eq!(
+                        pills,
+                        labels[first..first + pills.len()],
+                        "{label} at {width}"
+                    );
+                    // A `…` exactly where pills are left out.
+                    let more_before = first > 0;
+                    let more_after = first + pills.len() < labels.len();
+                    if words.len() > pills.len() || more_before || more_after {
+                        let lone = pills.len() == 1 && words.len() == 1;
+                        if !lone {
+                            assert_eq!(words[0] == "…", more_before, "{label} at {width}");
+                            assert_eq!(
+                                words.last() == Some(&"…"),
+                                more_after,
+                                "{label} at {width}"
+                            );
+                        }
+                    }
+                } else if width > 0 {
+                    assert!(text.ends_with('…'), "{label} at {width}: {text:?}");
+                }
+                if width > 35 {
+                    assert_eq!(text, " All  Remote  Hybrid  On-site  Saved", "{width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_jobs_list_stays_inside_its_card_at_every_size() {
+        let mut no_match = App::new();
+        no_match
+            .jobs
+            .retain(|j| j.workplace != crate::data::Workplace::Remote);
+        type_str(&mut no_match, "3f");
+        let mut states: Vec<(String, App)> = FILTERS
+            .iter()
+            .map(|(keys, label, _)| ((*label).to_owned(), jobs_after(keys)))
+            .collect();
+        states.push(("no saved jobs".to_owned(), jobs_after("sffff")));
+        states.push(("no jobs match".to_owned(), no_match));
+        std::thread::scope(|scope| {
+            for (name, app) in &states {
+                scope.spawn(move || {
+                    let label = app.job_filter.label();
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(1, 1)).expect("test backend is infallible");
+                    for width in 1..=140 {
+                        for height in 1..=40 {
+                            terminal.backend_mut().resize(width, height);
+                            terminal
+                                .draw(|f| draw(f, app))
+                                .unwrap_or_else(|e| panic!("{name} at {width}x{height}: {e}"));
+                            let card = job_list_card(width, height);
+                            if card.width < 2 || card.height < 2 {
+                                continue;
+                            }
+                            let buf = terminal.backend().buffer();
+                            for y in card.top()..card.bottom() {
+                                let row = rect_row(buf, card, y);
+                                let (l, r) = match y {
+                                    _ if y == card.top() => ('╭', '╮'),
+                                    _ if y + 1 == card.bottom() => ('╰', '╯'),
+                                    _ => ('│', '│'),
+                                };
+                                assert!(
+                                    row.starts_with(l) && row.ends_with(r),
+                                    "{name} at {width}x{height}, row {y}: {row:?}"
+                                );
+                            }
+                            // The active pill shows whole whenever the inside
+                            // of the card has room for it.
+                            let inner = usize_of(card.width.saturating_sub(4));
+                            if card.height >= 3 && width_of(label) <= inner {
+                                let row = rect_row(buf, card, card.y + 1);
+                                assert!(row.contains(label), "{name} at {width}x{height}: {row:?}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn jobs_footers_name_only_what_works() {
+        // Fitted to the screen as the event loop does, at 80×24 (where every
+        // seed job's details fit) and at 80×20 (where the Senior Rust
+        // Engineer's don't).
+        let fitted = |keys: &str, height: u16| {
+            let mut app = jobs_after(keys);
+            fit(&mut app, 80, height);
+            app
+        };
+        let footer = |app: &App, height: u16| {
+            screen(app, 80, height)
+                .lines()
+                .last()
+                .expect("screen has rows")
+                .trim()
+                .to_owned()
+        };
+        let cases = [
+            (
+                "",
+                24,
+                "j/k move  s save  e easy apply  f filter  1-5 tabs  q quit",
+            ),
+            (
+                "",
+                20,
+                "j/k move  s save  e easy apply  f filter  1-5 tabs  q quit  J/K scroll",
+            ),
+            (
+                "f",
+                20,
+                "j/k move  s save  e easy apply  f filter  1-5 tabs  q quit  J/K scroll",
+            ),
+            (
+                "ffff",
+                24,
+                "s save  e easy apply  f filter  1-5 tabs  q quit",
+            ),
+            (
+                "ffff",
+                20,
+                "s save  e easy apply  f filter  1-5 tabs  q quit  J/K scroll",
+            ),
+            ("sffff", 24, "f filter  1-5 tabs  q quit"),
+            ("sffff", 20, "f filter  1-5 tabs  q quit"),
+        ];
+        for (keys, height, want) in cases {
+            let app = fitted(keys, height);
+            assert_eq!(footer(&app, height), want, "{keys:?} at 80x{height}");
+            assert!(hints_line(&hints(&app)).width() <= 80, "{keys:?}");
+            // `J/K scroll` is there exactly when `J` moves the details.
+            let mut moved = fitted(keys, height);
+            let before = screen(&moved, 80, height);
+            press(&mut moved, KeyCode::Char('J'));
+            fit(&mut moved, 80, height);
+            assert_eq!(
+                want.contains("J/K"),
+                screen(&moved, 80, height) != before,
+                "{keys:?} at 80x{height}"
+            );
+        }
+        assert_eq!(hints_line(&hints(&fitted("", 20))).width(), 72);
+        // With one job, `j` and `k` have nowhere to go.
+        for key in ['j', 'k'] {
+            let mut app = jobs_after("ffff");
+            let before = screen(&app, 120, 30);
+            press(&mut app, KeyCode::Char(key));
+            assert_eq!(screen(&app, 120, 30), before, "{key}");
+        }
+        // No other tab says `f filter`.
+        for tab in ['1', '2', '4', '5'] {
+            let mut app = App::new();
+            press(&mut app, KeyCode::Char(tab));
+            assert!(!footer_at_80(&app).contains("filter"), "tab {tab}");
+        }
+    }
+
+    #[test]
+    fn j_scrolls_a_filtered_job_to_its_end_and_no_further() {
+        for (keys, label, _) in FILTERS {
+            let mut app = jobs_after(keys);
+            press(&mut app, KeyCode::Char('j'));
+            for _ in 0..30 {
+                fit(&mut app, 60, 20);
+                press(&mut app, KeyCode::Char('J'));
+            }
+            fit(&mut app, 60, 20);
+            assert!(app.job_scroll_max > 0, "{label} overflows at 60x20");
+            assert_eq!(app.job_scroll, app.job_scroll_max, "{label}");
+            let (top, rows, bottom) = job_card_rows(&app, 60, 20);
+            assert!(
+                top.contains("↑ more") && !bottom.contains("↓ more"),
+                "{label}"
+            );
+            assert!(!rows.last().expect("rows").is_empty(), "{label}: {rows:?}");
+            // The first `K` moves the text at once.
+            press(&mut app, KeyCode::Char('K'));
+            let (_, _, bottom) = job_card_rows(&app, 60, 20);
+            assert!(bottom.contains("↓ more"), "{label}");
         }
     }
 }
